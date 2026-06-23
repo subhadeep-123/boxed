@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use log::info;
 
 #[derive(Parser)]
 #[command(name = "boxed")]
@@ -27,9 +28,13 @@ enum Commands {
 }
 
 fn main() -> Result<()> {
-    env_logger::init();
+    env_logger::Builder::from_default_env()
+        .format_timestamp_millis()
+        .init();
 
     let cli = Cli::parse();
+
+    info!("Starting Container");
 
     match cli.command {
         Commands::Run {
@@ -38,10 +43,11 @@ fn main() -> Result<()> {
             mem,
             command,
         } => {
-            println!("[boxed] would run: {:?}", command);
-            println!("[boxed] rootfs:    {:?}", rootfs);
-            println!("[boxed] cpu quota: {:?}", cpu);
-            println!("[boxed] mem limit: {:?}", mem);
+            info!(
+                "container config: rootfs={:?} cpu={:?} mem={:?}",
+                rootfs, cpu, mem
+            );
+            info!("would run: {:?}", command);
         }
     }
 
