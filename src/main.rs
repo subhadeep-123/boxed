@@ -2,6 +2,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use log::info;
 
+mod process;
+
 #[derive(Parser)]
 #[command(name = "boxed")]
 #[command(about = "A container runtime built from scratch", version="0.1", long_about=None)]
@@ -47,9 +49,10 @@ fn main() -> Result<()> {
                 "container config: rootfs={:?} cpu={:?} mem={:?}",
                 rootfs, cpu, mem
             );
-            info!("would run: {:?}", command);
+
+            let exit_code = process::spawn_process(&command)?;
+            info!("existed with code {}", exit_code);
+            std::process::exit(exit_code)
         }
     }
-
-    Ok(())
 }
