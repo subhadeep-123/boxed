@@ -4,6 +4,7 @@ use log::info;
 
 mod namespace;
 mod process;
+mod rootfs;
 
 #[derive(Parser)]
 #[command(name = "boxed")]
@@ -51,7 +52,7 @@ fn main() -> Result<()> {
                 rootfs, cpu, mem
             );
 
-            let exit_code = namespace::run_in_namespace(&command)?;
+            let exit_code = namespace::run_in_namespace(&command, rootfs)?;
             info!("existed with code {}", exit_code);
             std::process::exit(exit_code)
         }

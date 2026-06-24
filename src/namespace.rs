@@ -7,10 +7,10 @@ use std::ffi::CString;
 
 const STACK_SIZE: usize = 1024 * 1024; // 1MB
 
-pub fn run_in_namespace(command: &[String]) -> Result<i32> {
+pub fn run_in_namespace(command: &[String], rootfs: Option<String>) -> Result<i32> {
     let mut stack = vec![0u8; STACK_SIZE];
-
     let cmd = command.to_vec();
+    let rootfs_path = rootfs.clone();
 
     let flags = CloneFlags::CLONE_NEWPID
         | CloneFlags::CLONE_NEWUTS
@@ -18,7 +18,7 @@ pub fn run_in_namespace(command: &[String]) -> Result<i32> {
         | CloneFlags::CLONE_NEWNET;
 
     let child_fn = Box::new(move || -> isize {
-        match child_main(&cmd) {
+        match child_main(&cmd, &rootfs_path) {
             Ok(_) => 0,
             Err(e) => {
                 log::error!("child error: {:?}", e);
@@ -43,8 +43,12 @@ pub fn run_in_namespace(command: &[String]) -> Result<i32> {
     }
 }
 
-fn child_main(command: &[String]) -> Result<()> {
+fn child_main(command: &[String], rootfs: &Option<String>) -> Result<()> {
     sethostname("boxed").context("failed to set hostname")?;
+
+    if let Some(path) = rootfs {
+        crate::rootfs::setup_rootfs(path).context("rootfs setup failed")?;
+    }
 
     let cmd_cstr = CString::new(command[0].as_str())?;
     let args: Vec<CString> = command
