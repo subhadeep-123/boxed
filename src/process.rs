@@ -6,6 +6,7 @@ use nix::{
 };
 use std::ffi::CString;
 
+#[allow(dead_code)]
 pub fn spawn_process(command: &[String]) -> Result<i32> {
     let cmd_cstr = CString::new(command[0].as_str())?;
     let args: Vec<CString> = command

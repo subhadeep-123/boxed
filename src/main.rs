@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use log::info;
 
+mod namespace;
 mod process;
 
 #[derive(Parser)]
@@ -50,7 +51,7 @@ fn main() -> Result<()> {
                 rootfs, cpu, mem
             );
 
-            let exit_code = process::spawn_process(&command)?;
+            let exit_code = namespace::run_in_namespace(&command)?;
             info!("existed with code {}", exit_code);
             std::process::exit(exit_code)
         }
