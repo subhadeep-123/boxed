@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use log::info;
 
+mod cgroups;
 mod namespace;
 mod process;
 mod rootfs;
@@ -52,7 +53,7 @@ fn main() -> Result<()> {
                 rootfs, cpu, mem
             );
 
-            let exit_code = namespace::run_in_namespace(&command, rootfs)?;
+            let exit_code = namespace::run_in_namespace(&command, rootfs, cpu, mem)?;
             info!("existed with code {}", exit_code);
             std::process::exit(exit_code)
         }

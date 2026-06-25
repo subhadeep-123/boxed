@@ -7,7 +7,12 @@ use std::ffi::CString;
 
 const STACK_SIZE: usize = 1024 * 1024; // 1MB
 
-pub fn run_in_namespace(command: &[String], rootfs: Option<String>) -> Result<i32> {
+pub fn run_in_namespace(
+    command: &[String],
+    rootfs: Option<String>,
+    cpu: Option<u64>,
+    mem: Option<u64>,
+) -> Result<i32> {
     let mut stack = vec![0u8; STACK_SIZE];
     let cmd = command.to_vec();
     let rootfs_path = rootfs.clone();
@@ -30,7 +35,19 @@ pub fn run_in_namespace(command: &[String], rootfs: Option<String>) -> Result<i3
     let child_pid = unsafe { clone(child_fn, &mut stack, flags, Some(Signal::SIGCHLD as i32)) }
         .context("clone failed")?;
 
-    match waitpid(child_pid, None).context("waitpid failed")? {
+    let cgroup = if cpu.is_some() || mem.is_some() {
+        let config = crate::cgroups::CgroupConfig {
+            cpu_quota: cpu,
+            memory_max: mem,
+        };
+        let cg = crate::cgroups::Cgroup::create(child_pid.as_raw() as u32, &config)?;
+        cg.add_process(child_pid.as_raw() as u32)?;
+        Some(cg)
+    } else {
+        None
+    };
+
+    let result = match waitpid(child_pid, None).context("waitpid failed")? {
         WaitStatus::Exited(_, code) => Ok(code),
         WaitStatus::Signaled(_, sig, _) => {
             log::info!("child killed by signal: {:?}", sig);
@@ -40,7 +57,13 @@ pub fn run_in_namespace(command: &[String], rootfs: Option<String>) -> Result<i3
             log::warn!("unexpected wait status: {:?}", other);
             Ok(1)
         }
+    };
+
+    if let Some(cg) = cgroup {
+        let _ = cg.destroy(); // best-effort cleanup
     }
+
+    result
 }
 
 fn child_main(command: &[String], rootfs: &Option<String>) -> Result<()> {
