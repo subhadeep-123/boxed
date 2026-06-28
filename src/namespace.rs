@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use nix::sched::{CloneFlags, clone};
 use nix::sys::signal::Signal;
-use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::sethostname;
 use std::ffi::CString;
 
@@ -47,17 +46,10 @@ pub fn run_in_namespace(
         None
     };
 
-    let result = match waitpid(child_pid, None).context("waitpid failed")? {
-        WaitStatus::Exited(_, code) => Ok(code),
-        WaitStatus::Signaled(_, sig, _) => {
-            log::info!("child killed by signal: {:?}", sig);
-            Ok(128 + sig as i32)
-        }
-        other => {
-            log::warn!("unexpected wait status: {:?}", other);
-            Ok(1)
-        }
-    };
+    crate::process::setup_signal_forwarding(child_pid)
+        .context("failed to setup up signal forwarding")?;
+
+    let result = crate::process::wait_for_child(child_pid);
 
     if let Some(cg) = cgroup {
         let _ = cg.destroy(); // best-effort cleanup
