@@ -54,7 +54,12 @@ fn main() -> Result<()> {
             );
 
             let exit_code = namespace::run_in_namespace(&command, rootfs, cpu, mem)?;
-            info!("existed with code {}", exit_code);
+            if exit_code == 0 {
+                info!("Goodbye!!",);
+            } else {
+                info!("Exited with code {}", exit_code);
+            }
+
             std::process::exit(exit_code)
         }
     }
