@@ -17,6 +17,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(trailing_var_arg = true)]
     Run {
         #[arg(long, help = "Path to root filesystem")]
         rootfs: Option<String>,
