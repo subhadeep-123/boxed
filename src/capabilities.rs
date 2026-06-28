@@ -11,7 +11,6 @@ const RETAINED_CAPS: &[Capability] = &[
     Capability::CAP_SETGID,
     Capability::CAP_SETUID,
     Capability::CAP_SETFCAP,
-    Capability::CAP_SETFCAP,
     Capability::CAP_NET_BIND_SERVICE,
     Capability::CAP_SYS_CHROOT,
     Capability::CAP_SETPCAP,
@@ -37,4 +36,62 @@ pub fn drop_capabilities() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn retained_caps_no_duplicates() {
+        let mut seen = HashSet::new();
+        for &cap in RETAINED_CAPS {
+            assert!(seen.insert(cap), "duplicate capability: {:?}", cap);
+        }
+    }
+
+    #[test]
+    fn retained_caps_not_empty() {
+        assert!(!RETAINED_CAPS.is_empty());
+    }
+
+    #[test]
+    fn retained_caps_excludes_dangerous() {
+        let dangerous = [
+            Capability::CAP_SYS_ADMIN,
+            Capability::CAP_SYS_PTRACE,
+            Capability::CAP_SYS_MODULE,
+            Capability::CAP_SYS_RAWIO,
+            Capability::CAP_NET_ADMIN,
+            Capability::CAP_SYS_BOOT,
+            Capability::CAP_SYS_TIME,
+        ];
+        for cap in &dangerous {
+            assert!(
+                !RETAINED_CAPS.contains(cap),
+                "dangerous capability retained: {:?}",
+                cap
+            );
+        }
+    }
+
+    #[test]
+    fn retained_caps_is_subset_of_all() {
+        let all = caps::all();
+        for &cap in RETAINED_CAPS {
+            assert!(all.contains(&cap), "unknown capability: {:?}", cap);
+        }
+    }
+
+    #[test]
+    fn retained_caps_smaller_than_full_set() {
+        assert!(RETAINED_CAPS.len() < caps::all().len());
+    }
+
+    #[test]
+    #[ignore = "requires root"]
+    fn drop_succeeds_as_root() {
+        drop_capabilities().expect("drop_capabilities failed");
+    }
 }
