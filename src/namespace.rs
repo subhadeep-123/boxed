@@ -73,6 +73,8 @@ fn child_main(command: &[String], rootfs: &Option<String>) -> Result<()> {
         crate::rootfs::setup_rootfs(path).context("rootfs setup failed")?;
     }
 
+    crate::capabilities::drop_capabilities().context("failed to drop capabilities")?;
+
     let cmd_cstr = CString::new(command[0].as_str())?;
     let args: Vec<CString> = command
         .iter()

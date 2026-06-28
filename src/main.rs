@@ -2,11 +2,11 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use log::info;
 
+mod capabilities;
 mod cgroups;
 mod namespace;
 mod process;
 mod rootfs;
-
 #[derive(Parser)]
 #[command(name = "boxed")]
 #[command(about = "A container runtime built from scratch", version="0.1", long_about=None)]
