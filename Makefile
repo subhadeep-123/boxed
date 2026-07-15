@@ -10,8 +10,7 @@ release:
 	cargo build --release
 
 run: build
-	sudo RUST_LOG=info ./target/debug/boxed run \
-		--rootfs /tmp/minirootfs --mem 67108864 /bin/sh
+	sudo RUST_LOG=info ./target/debug/boxed run --rootfs /tmp/minirootfs --memory 67108864 --hostname subhadeep /bin/sh 
 
 test:
 	cargo test

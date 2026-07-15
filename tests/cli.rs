@@ -32,7 +32,7 @@ fn run_subcommand_help() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("--rootfs"), "missing --rootfs flag");
     assert!(stdout.contains("--cpu"), "missing --cpu flag");
-    assert!(stdout.contains("--mem"), "missing --mem flag");
+    assert!(stdout.contains("--memory"), "missing --memory flag");
 }
 
 #[test]
@@ -159,7 +159,7 @@ fn run_memory_limit_applied() {
             "run",
             "--rootfs",
             "/tmp/minirootfs",
-            "--mem",
+            "--memory",
             "67108864", // 64 MB
             "/bin/sh",
             "-c",

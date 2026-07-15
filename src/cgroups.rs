@@ -28,8 +28,8 @@ impl Cgroup {
             fs::write(path.join("cpu.max"), value).context("failed to write cpu.max")?;
         }
 
-        if let Some(mem) = config.memory_max {
-            fs::write(path.join("memory.max"), mem.to_string())
+        if let Some(memory) = config.memory_max {
+            fs::write(path.join("memory.max"), memory.to_string())
                 .context("failed to write memory.max")?;
         }
 
@@ -49,6 +49,11 @@ impl Cgroup {
     }
 }
 
+impl Drop for Cgroup {
+    fn drop(&mut self) {
+        let _ = self.destroy();
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
