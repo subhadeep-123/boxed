@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use log::info;
 use nix::sched::{CloneFlags, clone};
 use nix::sys::signal::Signal;
 use nix::unistd::{Pid, sethostname};
@@ -110,6 +111,7 @@ impl RuntimeConfig {
         }
         .context("clone failed")?;
 
+        info!("Created Child with PID - {child_pid}");
         Ok(child_pid)
     }
 

@@ -7,6 +7,7 @@ mod cgroups;
 mod namespace;
 mod process;
 mod rootfs;
+mod rootless;
 
 #[derive(Parser)]
 #[command(name = "boxed")]
@@ -34,6 +35,9 @@ enum Commands {
 
         #[arg(long, help = "Hostname for the container")]
         hostname: Option<String>,
+
+        #[arg(long, help = "Run the container in a rootless (user) namespace")]
+        rootless: bool,
     },
 }
 
@@ -53,11 +57,23 @@ fn main() -> Result<()> {
             memory,
             command,
             hostname,
+            rootless,
         } => {
-            info!(
-                "container config: rootfs={:?} cpu={:?} memory={:?} hostname={:?}",
-                rootfs, cpu, memory, hostname
+            // TODO
+            // Config Parser
+            // Load Default Config
+            // Render with ASCI
+            // Initial Logs + Telemetry
+            let mut setup_msg = format!(
+                "container config: rootfs={rootfs:?} cpu={cpu:?} memory={memory:?} hostname={hostname:?}",
             );
+            if rootless {
+                setup_msg.push_str(" with rootless mode enabled");
+            } else {
+                setup_msg.push_str(" with rootless mode disabled");
+            }
+
+            info!("{setup_msg}");
 
             let exit_code = namespace::run_in_namespace(&command, rootfs, hostname, cpu, memory)?;
             if exit_code == 0 {
