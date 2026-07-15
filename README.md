@@ -11,7 +11,7 @@ The goal is not to ship a product. The goal is to understand, at the kernel leve
 ## Architecture
 
 ```text
-boxed run --rootfs /tmp/minirootfs --cpu 50000 --mem 268435456 /bin/sh
+boxed run --rootfs /tmp/minirootfs --cpu 50000 --memory 268435456 /bin/sh
       │
       ├── process.rs      fork() + execvp() + waitpid(), signal forwarding
       ├── namespace.rs    clone() with CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWNS | CLONE_NEWNET
@@ -52,7 +52,7 @@ sudo ./target/release/boxed run /bin/echo hello world
 sudo ./target/release/boxed run \
   --rootfs /tmp/minirootfs \
   --cpu 50000 \
-  --mem 268435456 \
+  --memory 268435456 \
   /bin/sh
 ```
 
@@ -71,7 +71,7 @@ Inside the container:
 
 | Module | What it does |
 | --- | --- |
-| `main.rs` | CLI entry point (`clap` derive). Parses `run` subcommand with `--rootfs`, `--cpu`, `--mem`. |
+| `main.rs` | CLI entry point (`clap` derive). Parses `run` subcommand with `--rootfs`, `--cpu`, `--memory`. |
 | `process.rs` | `fork()` + `execvp()` + `waitpid()`. Propagates exit codes. Signal forwarding. |
 | `namespace.rs` | `clone()` with PID, UTS, MNT, NET namespace flags. Sets hostname to `boxed`. |
 | `rootfs.rs` | Bind-mounts rootfs, `chroot()`s into it, mounts `/proc` inside the container. |
