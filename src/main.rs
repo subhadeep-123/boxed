@@ -59,8 +59,7 @@ fn main() -> Result<()> {
             hostname,
             rootless,
         } => {
-            // TODO
-            // Config Parser
+            // TODO - Config Parser
             // Load Default Config
             // Render with ASCI
             // Initial Logs + Telemetry
@@ -75,7 +74,8 @@ fn main() -> Result<()> {
 
             info!("{setup_msg}");
 
-            let exit_code = namespace::run_in_namespace(&command, rootfs, hostname, cpu, memory)?;
+            let exit_code =
+                namespace::run_in_namespace(&command, rootfs, hostname, cpu, memory, rootless)?;
             if exit_code == 0 {
                 info!("Goodbye!!",);
             } else {

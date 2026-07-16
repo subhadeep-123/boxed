@@ -6,6 +6,7 @@ use nix::unistd::{Pid, sethostname};
 use std::ffi::CString;
 
 use crate::cgroups::Cgroup;
+use crate::rootless::RootlessConfig;
 
 const STACK_SIZE: usize = 1024 * 1024; // 1MB
 
@@ -50,22 +51,33 @@ struct RuntimeConfig {
     cpu: Option<u64>,
     memory: Option<u64>,
     flags: CloneFlags,
+
+    rootless: RootlessConfig,
 }
 
 impl RuntimeConfig {
-    fn new(cpu: Option<u64>, memory: Option<u64>) -> Self {
+    fn new(cpu: Option<u64>, memory: Option<u64>, rootless: bool) -> Self {
+        let rootless_config = RootlessConfig::new(rootless);
+
         Self {
             cpu,
             memory,
-            flags: Self::build_clone_flags(),
+            flags: Self::build_clone_flags(&rootless_config),
+            rootless: rootless_config,
         }
     }
 
-    fn build_clone_flags() -> CloneFlags {
-        CloneFlags::CLONE_NEWPID
+    fn build_clone_flags(rootless_config: &RootlessConfig) -> CloneFlags {
+        let mut default_flags = CloneFlags::CLONE_NEWPID
             | CloneFlags::CLONE_NEWUTS
             | CloneFlags::CLONE_NEWNS
-            | CloneFlags::CLONE_NEWNET
+            | CloneFlags::CLONE_NEWNET;
+
+        if rootless_config.enabled {
+            default_flags |= CloneFlags::CLONE_NEWUSER;
+        }
+        
+        default_flags
     }
 
     fn setup_cgroup(&self, pid: Pid) -> Result<Option<Cgroup>> {
@@ -126,8 +138,9 @@ pub fn run_in_namespace(
     hostname: Option<String>,
     cpu: Option<u64>,
     memory: Option<u64>,
+    rootless: bool,
 ) -> Result<i32> {
-    let runtime = RuntimeConfig::new(cpu, memory);
+    let runtime = RuntimeConfig::new(cpu, memory, rootless);
 
     let child_ctx = ChildContext::new(command.to_vec(), rootfs, hostname);
 

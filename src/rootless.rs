@@ -1,3 +1,9 @@
-pub struct RootlessConfig {}
+pub struct RootlessConfig {
+    pub enabled: bool,
+}
 
-impl RootlessConfig {}
+impl RootlessConfig {
+    pub fn new(enabled: bool) -> Self {
+        Self { enabled }
+    }
+}
