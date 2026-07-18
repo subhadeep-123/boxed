@@ -2,8 +2,9 @@ use anyhow::{Context, Result};
 use log::info;
 use nix::sched::{CloneFlags, clone};
 use nix::sys::signal::Signal;
-use nix::unistd::{Pid, sethostname};
+use nix::unistd::{Pid, pipe, read, sethostname, write};
 use std::ffi::CString;
+use std::os::fd::OwnedFd;
 
 use crate::cgroups::Cgroup;
 use crate::rootless::RootlessConfig;
@@ -14,18 +15,29 @@ struct ChildContext {
     command: Vec<String>,
     rootfs: Option<String>,
     hostname: Option<String>,
+    sync_fd: OwnedFd,
 }
 
 impl ChildContext {
-    fn new(cmd: Vec<String>, rootfs: Option<String>, hostname: Option<String>) -> Self {
+    fn new(
+        cmd: Vec<String>,
+        rootfs: Option<String>,
+        hostname: Option<String>,
+        sync_fd: OwnedFd,
+    ) -> Self {
         Self {
             command: cmd,
             rootfs,
             hostname,
+            sync_fd,
         }
     }
 
     fn enter(&self) -> Result<()> {
+        // Check if parent is done writing
+        let mut buf = [0u8; 1];
+        read(&self.sync_fd, &mut buf)?;
+
         sethostname(self.hostname.as_deref().unwrap_or("boxed"))
             .context("failed to set hostname")?;
 
@@ -76,7 +88,7 @@ impl RuntimeConfig {
         if rootless_config.enabled {
             default_flags |= CloneFlags::CLONE_NEWUSER;
         }
-        
+
         default_flags
     }
 
@@ -142,9 +154,16 @@ pub fn run_in_namespace(
 ) -> Result<i32> {
     let runtime = RuntimeConfig::new(cpu, memory, rootless);
 
-    let child_ctx = ChildContext::new(command.to_vec(), rootfs, hostname);
+    // Read and write file descriptor for parent-child-synchronization
+    let (read_fd, write_fd) = pipe()?;
+
+    let child_ctx = ChildContext::new(command.to_vec(), rootfs, hostname, read_fd);
 
     let child = runtime.spawn_child(child_ctx)?;
+
+    // Unblock the child now that parent-side setup is done.
+    write(&write_fd, &[1])?;
+    drop(write_fd);
 
     let _cgroup = runtime.setup_cgroup(child)?;
 
