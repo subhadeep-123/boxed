@@ -23,9 +23,12 @@ pub fn setup_signal_forwarding(child_pid: Pid) -> Result<()> {
 
     unsafe {
         let handler = nix::sys::signal::SigHandler::Handler(forward_signal);
-        nix::sys::signal::signal(Signal::SIGINT, handler)?;
-        nix::sys::signal::signal(Signal::SIGTERM, handler)?;
-        nix::sys::signal::signal(Signal::SIGHUP, handler)?;
+        nix::sys::signal::signal(Signal::SIGINT, handler)
+            .with_context(|| format!("failed to install handler for {:?}", Signal::SIGINT))?;
+        nix::sys::signal::signal(Signal::SIGTERM, handler)
+            .with_context(|| format!("failed to install handler for {:?}", Signal::SIGTERM))?;
+        nix::sys::signal::signal(Signal::SIGHUP, handler)
+            .with_context(|| format!("failed to install handler for {:?}", Signal::SIGHUP))?;
     }
 
     Ok(())
