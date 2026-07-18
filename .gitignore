@@ -4,3 +4,4 @@ WELL.md
 .vscode
 issues/
 NOTE.md
+*.patch
