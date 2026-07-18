@@ -44,7 +44,7 @@ impl ChildContext {
     fn enter(&self) -> Result<()> {
         // Check if parent is done writing
         let mut buf = [0u8; 1];
-        read(&self.sync_fd, &mut buf)?;
+        read(&self.sync_fd, &mut buf).context("failed to read sync signal from parent")?;
 
         sethostname(self.hostname.as_deref().unwrap_or("boxed"))
             .context("failed to set hostname")?;
@@ -55,14 +55,16 @@ impl ChildContext {
 
         crate::capabilities::drop_capabilities().context("failed to drop capabilities")?;
 
-        let cmd_cstr = CString::new(self.command[0].as_str())?;
+        let cmd_cstr = CString::new(self.command[0].as_str())
+            .context("command name contains an embedded null byte")?;
         let args: Vec<CString> = self
             .command
             .iter()
             .map(|s| CString::new(s.as_str()).unwrap())
             .collect();
 
-        nix::unistd::execvp(&cmd_cstr, &args).context("execvp failed")?;
+        nix::unistd::execvp(&cmd_cstr, &args)
+            .with_context(|| format!("execvp failed for command '{}'", self.command[0]))?;
         unreachable!();
     }
 }
@@ -154,7 +156,7 @@ pub fn run_in_namespace(opts: RunOptions, rootless: RootlessConfig) -> Result<i3
     let runtime = RuntimeConfig::new(opts.cpu, opts.memory, rootless);
 
     // Read and write file descriptor for parent-child-synchronization
-    let (read_fd, write_fd) = pipe()?;
+    let (read_fd, write_fd) = pipe().context("failed to create parent-child sync pipe")?;
 
     let child_ctx = ChildContext::new(opts.command.to_vec(), opts.rootfs, opts.hostname, read_fd);
 
@@ -170,7 +172,7 @@ pub fn run_in_namespace(opts: RunOptions, rootless: RootlessConfig) -> Result<i3
         .context("failed to setup up signal forwarding")?;
 
     // Unblock the child now that parent-side setup is done.
-    write(&write_fd, &[1])?;
+    write(&write_fd, &[1]).context("failed to signal child to proceed")?;
     drop(write_fd);
 
     runtime.wait_for_child(child)
