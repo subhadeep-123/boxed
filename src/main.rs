@@ -38,6 +38,20 @@ enum Commands {
 
         #[arg(long, help = "Run the container in a rootless (user) namespace")]
         rootless: bool,
+
+        #[arg(
+            long,
+            requires = "rootless",
+            help = "Host UID to map into the container"
+        )]
+        host_uid: Option<u32>,
+
+        #[arg(
+            long,
+            requires = "rootless",
+            help = "Host GID to map into the container"
+        )]
+        host_gid: Option<u32>,
     },
 }
 
@@ -58,6 +72,8 @@ fn main() -> Result<()> {
             command,
             hostname,
             rootless,
+            host_uid,
+            host_gid,
         } => {
             // TODO - Config Parser
             // Load Default Config
@@ -82,7 +98,7 @@ fn main() -> Result<()> {
                 memory,
             };
 
-            let rootless = rootless::RootlessConfig::new(rootless);
+            let rootless = rootless::RootlessConfig::new(rootless, host_uid, host_gid);
 
             let exit_code = namespace::run_in_namespace(opts, rootless)?;
             if exit_code == 0 {

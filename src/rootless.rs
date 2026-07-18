@@ -7,13 +7,17 @@ use nix::unistd::{getgid, getuid};
 
 pub struct RootlessConfig {
     pub enabled: bool,
-    // host_uid: u8,
-    // host_gid: u8,
+    pub host_uid: Uid,
+    pub host_gid: Gid,
 }
 
 impl RootlessConfig {
-    pub fn new(enabled: bool) -> Self {
-        Self { enabled }
+    pub fn new(enabled: bool, uid: Option<u32>, gid: Option<u32>) -> Self {
+        Self {
+            enabled,
+            host_uid: uid.map(Uid::from_raw).unwrap_or_else(getuid),
+            host_gid: gid.map(Gid::from_raw).unwrap_or_else(getgid),
+        }
     }
 
     fn write_setgroups(pid: Pid) -> Result<()> {
@@ -65,16 +69,12 @@ impl RootlessConfig {
             return Ok(());
         }
 
-        // Get Pid and gid
-        let host_uid: Uid = getuid();
-        let host_gid: Gid = getgid();
-
         // Write "deny" to process setgroups file
         Self::write_setgroups(pid)?;
 
         // Maps Parents Pid/Gid with Child, now that setgroups is disabled
-        Self::write_uid_map(pid, host_uid)?;
-        Self::write_gid_map(pid, host_gid)?;
+        Self::write_uid_map(pid, self.host_uid)?;
+        Self::write_gid_map(pid, self.host_gid)?;
 
         Ok(())
     }
