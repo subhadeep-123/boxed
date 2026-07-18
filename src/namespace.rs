@@ -161,9 +161,8 @@ pub fn run_in_namespace(
 
     let child = runtime.spawn_child(child_ctx)?;
 
-    // Unblock the child now that parent-side setup is done.
-    write(&write_fd, &[1])?;
-    drop(write_fd);
+    // Setup Uid and Gid Mapping for between Parent and Child
+    runtime.rootless.setup_mappings(child)?;
 
     let _cgroup = runtime.setup_cgroup(child)?;
 
@@ -171,5 +170,9 @@ pub fn run_in_namespace(
         .setup_signals(child)
         .context("failed to setup up signal forwarding")?;
 
+    // Unblock the child now that parent-side setup is done.
+    write(&write_fd, &[1])?;
+    drop(write_fd);
+    
     runtime.wait_for_child(child)
 }
