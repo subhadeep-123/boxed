@@ -11,6 +11,14 @@ use crate::rootless::RootlessConfig;
 
 const STACK_SIZE: usize = 1024 * 1024; // 1MB
 
+pub struct RunOptions {
+    pub command: Vec<String>,
+    pub rootfs: Option<String>,
+    pub hostname: Option<String>,
+    pub cpu: Option<u64>,
+    pub memory: Option<u64>,
+}
+
 struct ChildContext {
     command: Vec<String>,
     rootfs: Option<String>,
@@ -68,24 +76,22 @@ struct RuntimeConfig {
 }
 
 impl RuntimeConfig {
-    fn new(cpu: Option<u64>, memory: Option<u64>, rootless: bool) -> Self {
-        let rootless_config = RootlessConfig::new(rootless);
-
+    fn new(cpu: Option<u64>, memory: Option<u64>, rootless: RootlessConfig) -> Self {
         Self {
             cpu,
             memory,
-            flags: Self::build_clone_flags(&rootless_config),
-            rootless: rootless_config,
+            flags: Self::build_clone_flags(rootless.enabled),
+            rootless,
         }
     }
 
-    fn build_clone_flags(rootless_config: &RootlessConfig) -> CloneFlags {
+    fn build_clone_flags(is_rootless: bool) -> CloneFlags {
         let mut default_flags = CloneFlags::CLONE_NEWPID
             | CloneFlags::CLONE_NEWUTS
             | CloneFlags::CLONE_NEWNS
             | CloneFlags::CLONE_NEWNET;
 
-        if rootless_config.enabled {
+        if is_rootless {
             default_flags |= CloneFlags::CLONE_NEWUSER;
         }
 
@@ -144,20 +150,13 @@ impl RuntimeConfig {
     }
 }
 
-pub fn run_in_namespace(
-    command: &[String],
-    rootfs: Option<String>,
-    hostname: Option<String>,
-    cpu: Option<u64>,
-    memory: Option<u64>,
-    rootless: bool,
-) -> Result<i32> {
-    let runtime = RuntimeConfig::new(cpu, memory, rootless);
+pub fn run_in_namespace(opts: RunOptions, rootless: RootlessConfig) -> Result<i32> {
+    let runtime = RuntimeConfig::new(opts.cpu, opts.memory, rootless);
 
     // Read and write file descriptor for parent-child-synchronization
     let (read_fd, write_fd) = pipe()?;
 
-    let child_ctx = ChildContext::new(command.to_vec(), rootfs, hostname, read_fd);
+    let child_ctx = ChildContext::new(opts.command.to_vec(), opts.rootfs, opts.hostname, read_fd);
 
     let child = runtime.spawn_child(child_ctx)?;
 
@@ -173,6 +172,6 @@ pub fn run_in_namespace(
     // Unblock the child now that parent-side setup is done.
     write(&write_fd, &[1])?;
     drop(write_fd);
-    
+
     runtime.wait_for_child(child)
 }

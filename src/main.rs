@@ -74,8 +74,17 @@ fn main() -> Result<()> {
 
             info!("{setup_msg}");
 
-            let exit_code =
-                namespace::run_in_namespace(&command, rootfs, hostname, cpu, memory, rootless)?;
+            let opts = namespace::RunOptions {
+                command,
+                rootfs,
+                hostname,
+                cpu,
+                memory,
+            };
+
+            let rootless = rootless::RootlessConfig::new(rootless);
+
+            let exit_code = namespace::run_in_namespace(opts, rootless)?;
             if exit_code == 0 {
                 info!("Goodbye!!",);
             } else {
