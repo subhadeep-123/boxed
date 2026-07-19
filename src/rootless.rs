@@ -1,6 +1,6 @@
 use std::{fs::OpenOptions, io::Write};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Ok, Result};
 use log::info;
 use nix::unistd::{Gid, Pid, Uid};
 use nix::unistd::{getgid, getuid};
@@ -12,12 +12,47 @@ pub struct RootlessConfig {
 }
 
 impl RootlessConfig {
-    pub fn new(enabled: bool, uid: Option<u32>, gid: Option<u32>) -> Self {
-        Self {
+    pub fn new(enabled: bool, uid: Option<u32>, gid: Option<u32>) -> Result<Self> {
+        let privileged = getuid().is_root();
+
+        let host_uid = Self::validate_uid(uid, privileged)?;
+        let host_gid = Self::validate_gid(gid, privileged)?;
+
+        Ok(Self {
             enabled,
-            host_uid: uid.map(Uid::from_raw).unwrap_or_else(getuid),
-            host_gid: gid.map(Gid::from_raw).unwrap_or_else(getgid),
-        }
+            host_uid,
+            host_gid,
+        })
+    }
+
+    fn validate_uid(uid: Option<u32>, privileged: bool) -> Result<Uid> {
+        let real_uid = getuid();
+
+        let uid = match uid {
+            None => Ok(real_uid), // no --host-uid given, just use ours
+            Some(want) if privileged => Ok(Uid::from_raw(want)), // privileged: kernel allows anything
+            Some(want) if want == real_uid.as_raw() => Ok(Uid::from_raw(want)), // unprivileged but matches own uid: legal
+            Some(want) => anyhow::bail!(
+                "cannot map host uid {want}: unprivileged process can only map its own real uid ({real_uid})"
+            ),
+        };
+
+        uid
+    }
+
+    fn validate_gid(gid: Option<u32>, privileged: bool) -> Result<Gid> {
+        let real_gid = getgid();
+
+        let gid = match gid {
+            None => Ok(real_gid), // no --host-gid given, just use ours
+            Some(want) if privileged => Ok(Gid::from_raw(want)), // privileged: kernel allows anything
+            Some(want) if want == real_gid.as_raw() => Ok(Gid::from_raw(want)), // unprivileged but matches own gid: legal
+            Some(want) => anyhow::bail!(
+                "cannot map host gid {want}: unprivileged process can only map its own real gid ({real_gid})"
+            ),
+        };
+
+        gid
     }
 
     fn write_setgroups(pid: Pid) -> Result<()> {

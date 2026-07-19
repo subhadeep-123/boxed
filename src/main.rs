@@ -98,7 +98,7 @@ fn main() -> Result<()> {
                 memory,
             };
 
-            let rootless = rootless::RootlessConfig::new(rootless, host_uid, host_gid);
+            let rootless = rootless::RootlessConfig::new(rootless, host_uid, host_gid)?;
 
             let exit_code = namespace::run_in_namespace(opts, rootless)?;
             if exit_code == 0 {
