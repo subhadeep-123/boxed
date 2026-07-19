@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use log::{error, info};
 use nix::sched::{CloneFlags, clone};
+use nix::sys::prctl::set_no_new_privs;
 use nix::sys::signal::Signal;
 use nix::unistd::{Pid, pipe, read, sethostname, write};
 use std::ffi::CString;
@@ -47,7 +48,7 @@ impl ChildContext {
         let res = read(&self.sync_fd, &mut buf).context("failed to read sync signal from parent");
         match res {
             Ok(0) => anyhow::bail!("received 0 byte from parent process, indicating closed pipe"),
-            Ok(n) => info!("received {n} byte from parent process, synchronization complete"),
+            Ok(n) => info!("Received {n} byte from parent process, synchronization complete"),
             Err(e) => {
                 error!("{e}");
                 return Err(e);
@@ -61,7 +62,12 @@ impl ChildContext {
             crate::rootfs::setup_rootfs(path).context("rootfs setup failed")?;
         }
 
+        // Drop extra capabilities for the container
         crate::capabilities::drop_capabilities().context("failed to drop capabilities")?;
+
+        // Set the calling thread's `no_new_privs` attribute.
+        // Once set this option can not be unset
+        set_no_new_privs().context("failed to set no_new_privs for child process")?;
 
         let cmd_cstr = CString::new(self.command[0].as_str())
             .context("command name contains an embedded null byte")?;
