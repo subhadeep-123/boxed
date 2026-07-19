@@ -33,6 +33,95 @@ fn run_subcommand_help() {
     assert!(stdout.contains("--rootfs"), "missing --rootfs flag");
     assert!(stdout.contains("--cpu"), "missing --cpu flag");
     assert!(stdout.contains("--memory"), "missing --memory flag");
+    assert!(stdout.contains("--rootless"), "missing --rootless flag");
+    assert!(stdout.contains("--uid"), "missing --uid flag");
+    assert!(stdout.contains("--gid"), "missing --gid flag");
+}
+
+// ── rootless flag wiring (no root required) ──────────────────────────────────
+
+#[test]
+fn uid_without_rootless_fails() {
+    let out = boxed()
+        .args(["run", "--uid", "1000", "/bin/true"])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "--uid without --rootless should be rejected by clap's `requires`"
+    );
+}
+
+#[test]
+fn gid_without_rootless_fails() {
+    let out = boxed()
+        .args(["run", "--gid", "1000", "/bin/true"])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "--gid without --rootless should be rejected by clap's `requires`"
+    );
+}
+
+#[test]
+fn rootless_uid_sentinel_max_is_rejected() {
+    // Fails inside RootlessConfig::new()'s validation, before any namespace
+    // or privileged operation runs -- doesn't need root.
+    let out = boxed()
+        .args(["run", "--rootless", "--uid", "4294967295", "/bin/true"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("sentinel"),
+        "expected sentinel-rejection message, got: {stderr}"
+    );
+}
+
+#[test]
+fn rootless_gid_sentinel_max_is_rejected() {
+    let out = boxed()
+        .args(["run", "--rootless", "--gid", "4294967295", "/bin/true"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("sentinel"),
+        "expected sentinel-rejection message, got: {stderr}"
+    );
+}
+
+#[test]
+fn rootless_default_uid_is_root_inside() {
+    // Unprivileged user namespaces are the whole point of --rootless: this
+    // needs no root and no sudo, unlike the CLONE_NEWUSER-less tests below.
+    let out = boxed()
+        .args(["run", "--rootless", "/usr/bin/id", "-u"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "0");
+}
+
+#[test]
+fn rootless_custom_uid_is_applied() {
+    let out = boxed()
+        .args(["run", "--rootless", "--uid", "1000", "/usr/bin/id", "-u"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1000");
 }
 
 #[test]
@@ -146,6 +235,38 @@ fn run_exit_code_propagates() {
         out.status.code(),
         Some(42),
         "exit code should propagate from container"
+    );
+}
+
+#[test]
+#[ignore = "environment-dependent: relies on cgroups v2 NOT being delegated \
+            to the invoking (non-root) user, so cgroup setup fails after the \
+            child is already spawned -- exercises the orphan-leak fix"]
+fn cgroup_setup_failure_does_not_leak_child() {
+    // Forces a failure between spawn_child() and the final sync-pipe write:
+    // --memory triggers setup_cgroup(), which fails with Permission denied
+    // creating /sys/fs/cgroup/boxed unless this user has cgroup delegation.
+    // `sleep 5` (not a fast-exiting command) makes a leaked child observable
+    // via pgrep instead of racing an instant exit.
+    let out = Command::new(env!("CARGO_BIN_EXE_boxed"))
+        .args(["run", "--rootless", "--memory", "104857600", "sleep", "5"])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "expected cgroup setup to fail without delegation"
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let leaked = Command::new("pgrep")
+        .args(["-f", "sleep 5"])
+        .output()
+        .unwrap();
+    assert!(
+        !leaked.status.success(),
+        "found leaked child process(es): {}",
+        String::from_utf8_lossy(&leaked.stdout)
     );
 }
 
