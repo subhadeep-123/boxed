@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use log::info;
+use log::{error, info};
 use nix::sched::{CloneFlags, clone};
 use nix::sys::signal::Signal;
 use nix::unistd::{Pid, pipe, read, sethostname, write};
@@ -44,7 +44,15 @@ impl ChildContext {
     fn enter(&self) -> Result<()> {
         // Check if parent is done writing
         let mut buf = [0u8; 1];
-        read(&self.sync_fd, &mut buf).context("failed to read sync signal from parent")?;
+        let res = read(&self.sync_fd, &mut buf).context("failed to read sync signal from parent");
+        match res {
+            Ok(0) => anyhow::bail!("received 0 byte from parent process, indicating closed pipe"),
+            Ok(n) => info!("received {n} byte from parent process, synchronization complete"),
+            Err(e) => {
+                error!("{e}");
+                return Err(e);
+            }
+        };
 
         sethostname(self.hostname.as_deref().unwrap_or("boxed"))
             .context("failed to set hostname")?;
