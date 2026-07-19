@@ -185,3 +185,29 @@ pub fn run_in_namespace(opts: RunOptions, rootless: RootlessConfig) -> Result<i3
 
     runtime.wait_for_child(child)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clone_flags_baseline_always_present() {
+        let flags = RuntimeConfig::build_clone_flags(false);
+        assert!(flags.contains(CloneFlags::CLONE_NEWPID));
+        assert!(flags.contains(CloneFlags::CLONE_NEWUTS));
+        assert!(flags.contains(CloneFlags::CLONE_NEWNS));
+        assert!(flags.contains(CloneFlags::CLONE_NEWNET));
+    }
+
+    #[test]
+    fn clone_flags_excludes_newuser_when_not_rootless() {
+        let flags = RuntimeConfig::build_clone_flags(false);
+        assert!(!flags.contains(CloneFlags::CLONE_NEWUSER));
+    }
+
+    #[test]
+    fn clone_flags_includes_newuser_when_rootless() {
+        let flags = RuntimeConfig::build_clone_flags(true);
+        assert!(flags.contains(CloneFlags::CLONE_NEWUSER));
+    }
+}
