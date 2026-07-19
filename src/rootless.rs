@@ -1,58 +1,44 @@
 use std::{fs::OpenOptions, io::Write};
 
-use anyhow::{Context, Ok, Result};
+use anyhow::{Context, Result};
 use log::info;
 use nix::unistd::{Gid, Pid, Uid};
 use nix::unistd::{getgid, getuid};
 
 pub struct RootlessConfig {
     pub enabled: bool,
-    pub host_uid: Uid,
-    pub host_gid: Gid,
+
+    // Inside-container Uid and Gid
+    pub uid: Uid,
+    pub gid: Gid,
 }
 
 impl RootlessConfig {
     pub fn new(enabled: bool, uid: Option<u32>, gid: Option<u32>) -> Result<Self> {
-        let privileged = getuid().is_root();
-
-        let host_uid = Self::validate_uid(uid, privileged)?;
-        let host_gid = Self::validate_gid(gid, privileged)?;
-
         Ok(Self {
             enabled,
-            host_uid,
-            host_gid,
+            uid: Self::validate_uid(uid)?,
+            gid: Self::validate_gid(gid)?,
         })
     }
-
-    fn validate_uid(uid: Option<u32>, privileged: bool) -> Result<Uid> {
-        let real_uid = getuid();
-
-        let uid = match uid {
-            None => Ok(real_uid), // no --host-uid given, just use ours
-            Some(want) if privileged => Ok(Uid::from_raw(want)), // privileged: kernel allows anything
-            Some(want) if want == real_uid.as_raw() => Ok(Uid::from_raw(want)), // unprivileged but matches own uid: legal
+    fn validate_uid(uid: Option<u32>) -> Result<Uid> {
+        match uid {
+            None => Ok(Uid::from_raw(0)),
+            Some(want) if want != u32::MAX => Ok(Uid::from_raw(want)),
             Some(want) => anyhow::bail!(
-                "cannot map host uid {want}: unprivileged process can only map its own real uid ({real_uid})"
+                "cannot map inside uid {want}: collides with the POSIX (uid_t)-1 sentinel for \"unchanged/invalid\""
             ),
-        };
-
-        uid
+        }
     }
 
-    fn validate_gid(gid: Option<u32>, privileged: bool) -> Result<Gid> {
-        let real_gid = getgid();
-
-        let gid = match gid {
-            None => Ok(real_gid), // no --host-gid given, just use ours
-            Some(want) if privileged => Ok(Gid::from_raw(want)), // privileged: kernel allows anything
-            Some(want) if want == real_gid.as_raw() => Ok(Gid::from_raw(want)), // unprivileged but matches own gid: legal
+    fn validate_gid(gid: Option<u32>) -> Result<Gid> {
+        match gid {
+            None => Ok(Gid::from_raw(0)),
+            Some(want) if want != u32::MAX => Ok(Gid::from_raw(want)),
             Some(want) => anyhow::bail!(
-                "cannot map host gid {want}: unprivileged process can only map its own real gid ({real_gid})"
+                "cannot map inside gid {want}: collides with the POSIX (gid_t)-1 sentinel for \"unchanged/invalid\""
             ),
-        };
-
-        gid
+        }
     }
 
     fn write_setgroups(pid: Pid) -> Result<()> {
@@ -70,39 +56,35 @@ impl RootlessConfig {
         Ok(())
     }
 
-    fn write_uid_map(pid: Pid, host_uid: Uid) -> Result<()> {
+    fn write_uid_map(pid: Pid, uid: Uid) -> Result<()> {
         let mut uid_map_file = OpenOptions::new()
             .write(true)
             .open(format!("/proc/{pid}/uid_map"))
             .context(format!("failed to open uid_map for pid {pid}"))?;
 
-        let mapping = format!("0 {} 1\n", host_uid.as_raw());
+        let host_uid = getuid();
+        let mapping = format!("{} {} 1\n", uid.as_raw(), host_uid);
         uid_map_file
-        .write_all(mapping.as_bytes())
-        .context(format!("failed to write uid mapping '{mapping}' for pid {pid} (unprivileged processes may only map their own real uid)"))?;
+            .write_all(mapping.as_bytes())
+            .context(format!("failed to write uid mapping '{mapping}' for pid {pid}"))?;
 
-        info!(
-            "Initialized UID mapping for process {} to host UID {}",
-            pid, host_uid
-        );
+        info!("Initialized UID mapping for process {pid}: inside uid {uid} -> host uid {host_uid}");
         Ok(())
     }
 
-    fn write_gid_map(pid: Pid, host_gid: Gid) -> Result<()> {
+    fn write_gid_map(pid: Pid, gid: Gid) -> Result<()> {
         let mut gid_map_file = OpenOptions::new()
             .write(true)
             .open(format!("/proc/{pid}/gid_map"))
             .context(format!("failed to open gid_map for pid {pid}"))?;
 
-        let mapping = format!("0 {} 1\n", host_gid.as_raw());
+        let host_gid = getgid();
+        let mapping = format!("{} {} 1\n", gid.as_raw(), host_gid);
         gid_map_file
-        .write_all(mapping.as_bytes())
-        .context(format!("failed to write gid mapping '{mapping}' for pid {pid} (unprivileged processes may only map their own real gid)"))?;
+            .write_all(mapping.as_bytes())
+            .context(format!("failed to write gid mapping '{mapping}' for pid {pid}"))?;
 
-        info!(
-            "Initialized GID mapping for process {} to host GID {}",
-            pid, host_gid
-        );
+        info!("Initialized GID mapping for process {pid}: inside gid {gid} -> host gid {host_gid}");
         Ok(())
     }
 
@@ -117,8 +99,8 @@ impl RootlessConfig {
         Self::write_setgroups(pid)?;
 
         // Maps Parents Pid/Gid with Child, now that setgroups is disabled
-        Self::write_uid_map(pid, self.host_uid)?;
-        Self::write_gid_map(pid, self.host_gid)?;
+        Self::write_uid_map(pid, self.uid)?;
+        Self::write_gid_map(pid, self.gid)?;
 
         Ok(())
     }
