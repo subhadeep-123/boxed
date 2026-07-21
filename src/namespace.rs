@@ -9,6 +9,7 @@ use std::os::fd::OwnedFd;
 
 use crate::cgroups::Cgroup;
 use crate::rootless::RootlessConfig;
+use crate::seccomp::apply_default_filter;
 
 const STACK_SIZE: usize = 1024 * 1024; // 1MB
 
@@ -68,6 +69,7 @@ impl ChildContext {
         // Set the calling thread's `no_new_privs` attribute.
         // Once set this option can not be unset
         set_no_new_privs().context("failed to set no_new_privs for child process")?;
+        apply_default_filter().context("failed to apply default seccomp filters")?;
 
         let cmd_cstr = CString::new(self.command[0].as_str())
             .context("command name contains an embedded null byte")?;

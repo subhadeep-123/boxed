@@ -8,6 +8,7 @@ mod namespace;
 mod process;
 mod rootfs;
 mod rootless;
+mod seccomp;
 
 #[derive(Parser)]
 #[command(name = "boxed")]
