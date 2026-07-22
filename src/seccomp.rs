@@ -8,27 +8,65 @@ use libc::{
 // EM_X86_64 | __AUDIT_ARCH_64BIT | __AUDIT_ARCH_LE
 const AUDIT_ARCH_X86_64: u32 = 0xC000003E;
 
-// Allowed Syscalls from strace -f /bin/echo hello
-const ALLOWED_SYSCALLS: &[i64] = &[
-    libc::SYS_execve,
-    libc::SYS_brk,
-    libc::SYS_mmap,
-    libc::SYS_access,
-    libc::SYS_openat,
-    libc::SYS_fstat,
-    libc::SYS_close,
-    libc::SYS_read,
-    libc::SYS_pread64,
-    libc::SYS_mprotect,
-    libc::SYS_munmap,
-    libc::SYS_arch_prctl,
-    libc::SYS_set_tid_address,
-    libc::SYS_set_robust_list,
-    libc::SYS_rseq,
-    libc::SYS_getrandom,
-    libc::SYS_write,
-    libc::SYS_exit_group,
-    libc::SYS_prlimit64,
+// Dangerous  Syscalls
+const DANGEROUS_SYSCALLS: &[i64] = &[
+    // system state / boot / power
+    libc::SYS_reboot,
+    libc::SYS_acct,
+    libc::SYS_swapon,
+    libc::SYS_swapoff,
+    // filesystem mounting — container escape surface
+    libc::SYS_mount,
+    libc::SYS_umount2,
+    libc::SYS_pivot_root,
+    libc::SYS_open_by_handle_at,
+    libc::SYS_sysfs,
+    // kernel module loading — arbitrary kernel code execution
+    libc::SYS_init_module,
+    libc::SYS_finit_module,
+    libc::SYS_delete_module,
+    // kernel image loading
+    libc::SYS_kexec_load,
+    libc::SYS_kexec_file_load,
+    // debugging/introspection of other processes
+    libc::SYS_ptrace,
+    libc::SYS_process_vm_readv,
+    libc::SYS_process_vm_writev,
+    libc::SYS_kcmp,
+    // direct hardware I/O
+    libc::SYS_iopl,
+    libc::SYS_ioperm,
+    // clock/time tampering
+    libc::SYS_settimeofday,
+    libc::SYS_clock_settime,
+    libc::SYS_clock_adjtime,
+    libc::SYS_adjtimex,
+    // kernel keyring
+    libc::SYS_add_key,
+    libc::SYS_request_key,
+    libc::SYS_keyctl,
+    // eBPF, perf, io_uring — kernel-level tracing/execution surfaces
+    libc::SYS_bpf,
+    libc::SYS_perf_event_open,
+    libc::SYS_io_uring_setup,
+    libc::SYS_io_uring_enter,
+    libc::SYS_io_uring_register,
+    // NUMA memory policy — rarely needed, historically buggy
+    libc::SYS_mbind,
+    libc::SYS_set_mempolicy,
+    libc::SYS_get_mempolicy,
+    libc::SYS_move_pages,
+    // namespace joining
+    libc::SYS_setns,
+    // obsolete/rarely-needed, historically privilege-adjacent
+    libc::SYS_quotactl,
+    libc::SYS_nfsservctl,
+    libc::SYS_lookup_dcookie,
+    libc::SYS_uselib,
+    libc::SYS_ustat,
+    libc::SYS_userfaultfd,
+    libc::SYS__sysctl,
+    libc::SYS_personality,
 ];
 
 // Instruction Constructors (Internal Helpers)
@@ -77,28 +115,20 @@ fn build_filter() -> Vec<sock_filter> {
         std::mem::offset_of!(seccomp_data, nr) as u32,
     ));
 
-    // Step <4> one [compare, allow] PAIR per allowed syscall — this pairing
-    //    is the trick that avoids hand-computing long forward jump
-    //    offsets: jf=1 always means "skip just the next instruction",
-    //    which is always the RET_ALLOW directly below this JEQ.
-    for &nr in ALLOWED_SYSCALLS {
+    // Step <4> one Pair Per Dangerous SYSCall - same shape as before,  RET payload flipped
+    for &nr in DANGEROUS_SYSCALLS {
         prog.push(jump((BPF_JMP | BPF_JEQ | BPF_K) as u16, 0, 1, nr as u32));
-        prog.push(stmt((BPF_RET | BPF_K) as u16, SECCOMP_RET_ALLOW));
+        prog.push(stmt((BPF_RET | BPF_K) as u16, SECCOMP_RET_KILL_PROCESS));
     }
 
-    // Step <4> Fell through every pair without matching -> Kill
-    prog.push(stmt((BPF_RET | BPF_K) as u16, SECCOMP_RET_KILL_PROCESS));
+    // Step <4> Fell through every pair without matching -> Allow
+    prog.push(stmt((BPF_RET | BPF_K) as u16, SECCOMP_RET_ALLOW));
 
     prog
 }
 
 // Installer Stage
 fn install_filter(prog: &mut [libc::sock_filter]) -> Result<()> {
-    // build sock_fprog { len: prog.len() as u16, filter: prog.as_mut_ptr() }
-    // unsafe { libc::prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &fprog as *const _ as c_ulong, 0, 0) }
-    // ret == -1 -> Err(Errno::last()).context(...)
-    // else Ok(())
-
     let fprog = sock_fprog {
         len: prog.len() as u16,
         filter: prog.as_mut_ptr(),
