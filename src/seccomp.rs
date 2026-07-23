@@ -37,10 +37,13 @@ struct ArgRule {
     op: String,
 }
 
+#[derive(Debug)]
 struct ResolveRule {
     numbers: Vec<i64>,
     action: u32,
 }
+
+#[derive(Debug)]
 pub struct ResolvedProfile {
     rules: Vec<ResolveRule>,
     default_action: u32,
@@ -407,4 +410,163 @@ pub fn apply_default_filter(profile: Option<&ResolvedProfile>) -> Result<()> {
     let mut prog = build_filter(profile);
 
     install_filter(&mut prog)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn syscall_number_resolves_known_name() {
+        assert_eq!(syscall_number("reboot"), Some(libc::SYS_reboot));
+        assert_eq!(syscall_number("execve"), Some(libc::SYS_execve));
+    }
+
+    #[test]
+    fn syscall_number_rejects_unknown_name() {
+        assert_eq!(syscall_number("not_a_real_syscall"), None);
+    }
+
+    #[test]
+    fn resolve_action_resolves_known_action() {
+        assert_eq!(resolve_action("SCMP_ACT_ALLOW"), Some(SECCOMP_RET_ALLOW));
+        assert_eq!(
+            resolve_action("SCMP_ACT_KILL_PROCESS"),
+            Some(SECCOMP_RET_KILL_PROCESS)
+        );
+    }
+
+    #[test]
+    fn resolve_action_rejects_unknown_action() {
+        assert_eq!(resolve_action("SCMP_ACT_NOTIFY"), None);
+        assert_eq!(resolve_action(""), None);
+    }
+
+    #[test]
+    fn dangerous_syscalls_not_empty() {
+        assert!(!DANGEROUS_SYSCALLS.is_empty());
+    }
+
+    #[test]
+    fn dangerous_syscalls_no_duplicates() {
+        let mut seen = std::collections::HashSet::new();
+        for &nr in DANGEROUS_SYSCALLS {
+            assert!(seen.insert(nr), "duplicate syscall number: {nr}");
+        }
+    }
+
+    fn parse(json: &str) -> Result<ResolvedProfile> {
+        let profile: SeccompProfile = serde_json::from_str(json)?;
+        profile.resolve()
+    }
+
+    #[test]
+    fn resolve_valid_profile_succeeds() {
+        let profile = parse(
+            r#"{
+                "defaultAction": "SCMP_ACT_ERRNO",
+                "syscalls": [
+                    {"names": ["execve", "write"], "action": "SCMP_ACT_ALLOW"},
+                    {"names": ["reboot"], "action": "SCMP_ACT_KILL"}
+                ]
+            }"#,
+        )
+        .expect("valid profile should resolve");
+
+        assert_eq!(profile.rules.len(), 2);
+        assert_eq!(profile.default_action, SECCOMP_RET_ERRNO);
+        assert_eq!(
+            profile.rules[0].numbers,
+            vec![libc::SYS_execve, libc::SYS_write]
+        );
+        assert_eq!(profile.rules[0].action, SECCOMP_RET_ALLOW);
+        assert_eq!(profile.rules[1].action, SECCOMP_RET_KILL);
+    }
+
+    #[test]
+    fn resolve_rejects_empty_names() {
+        let err = parse(
+            r#"{"defaultAction": "SCMP_ACT_ALLOW", "syscalls": [{"names": [], "action": "SCMP_ACT_ALLOW"}]}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("at least one name"));
+    }
+
+    #[test]
+    fn resolve_rejects_unknown_syscall_name() {
+        let err = parse(
+            r#"{"defaultAction": "SCMP_ACT_ALLOW", "syscalls": [{"names": ["not_real"], "action": "SCMP_ACT_ALLOW"}]}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not_real"));
+    }
+
+    #[test]
+    fn resolve_rejects_unknown_action() {
+        let err = parse(
+            r#"{"defaultAction": "SCMP_ACT_ALLOW", "syscalls": [{"names": ["read"], "action": "SCMP_ACT_TRACE"}]}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("SCMP_ACT_TRACE"));
+    }
+
+    #[test]
+    fn resolve_rejects_args_conditional_rule() {
+        let err = parse(
+            r#"{
+                "defaultAction": "SCMP_ACT_ALLOW",
+                "syscalls": [{
+                    "names": ["personality"],
+                    "action": "SCMP_ACT_ALLOW",
+                    "args": [{"index": 0, "value": 0, "op": "SCMP_CMP_EQ"}]
+                }]
+            }"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("arg-conditional matching"));
+    }
+
+    #[test]
+    fn resolve_rejects_unknown_default_action() {
+        let err = parse(r#"{"defaultAction": "SCMP_ACT_NOTIFY", "syscalls": []}"#).unwrap_err();
+        assert!(err.to_string().contains("default action"));
+    }
+
+    #[test]
+    fn resolve_rejects_non_x86_64_architecture() {
+        let err = parse(
+            r#"{"defaultAction": "SCMP_ACT_ALLOW", "architectures": ["SCMP_ARCH_AARCH64"], "syscalls": []}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("SCMP_ARCH_X86_64"));
+    }
+
+    #[test]
+    fn resolve_accepts_empty_architectures() {
+        parse(r#"{"defaultAction": "SCMP_ACT_ALLOW", "syscalls": []}"#)
+            .expect("empty architectures should be treated as x86_64");
+    }
+
+    #[test]
+    fn resolve_accepts_architectures_containing_x86_64() {
+        parse(
+            r#"{"defaultAction": "SCMP_ACT_ALLOW", "architectures": ["SCMP_ARCH_ARM", "SCMP_ARCH_X86_64"], "syscalls": []}"#,
+        )
+        .expect("x86_64 present among other architectures should be accepted");
+    }
+
+    #[test]
+    fn build_filter_default_ends_with_allow() {
+        let prog = build_filter(None);
+        let last = prog.last().expect("default filter should not be empty");
+        assert_eq!(last.k, SECCOMP_RET_ALLOW);
+    }
+
+    #[test]
+    fn build_filter_from_profile_uses_resolved_default_action() {
+        let profile = parse(r#"{"defaultAction": "SCMP_ACT_ERRNO", "syscalls": []}"#).unwrap();
+        let prog = build_filter(Some(&profile));
+        let last = prog.last().expect("profile filter should not be empty");
+        assert_eq!(last.k, SECCOMP_RET_ERRNO);
+    }
 }

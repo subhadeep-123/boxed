@@ -1,0 +1,19 @@
+{
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "architectures": ["SCMP_ARCH_X86_64"],
+  "syscalls": [
+    {
+      "names": [
+        "execve", "brk", "mmap", "access", "openat", "fstat", "close",
+        "read", "pread64", "mprotect", "munmap", "arch_prctl",
+        "set_tid_address", "set_robust_list", "rseq", "getrandom",
+        "write", "exit_group", "prlimit64"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "names": ["mount", "reboot"],
+      "action": "SCMP_ACT_KILL"
+    }
+  ]
+}
