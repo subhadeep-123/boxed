@@ -8,6 +8,7 @@ mod namespace;
 mod process;
 mod rootfs;
 mod rootless;
+mod seccomp;
 
 #[derive(Parser)]
 #[command(name = "boxed")]
@@ -52,6 +53,9 @@ enum Commands {
             help = "GID to appear as inside the container"
         )]
         gid: Option<u32>,
+
+        #[arg(long, help = "Parse JSON file for secure computing configuration")]
+        seccomp_profile: Option<String>,
     },
 }
 
@@ -74,6 +78,7 @@ fn main() -> Result<()> {
             rootless,
             uid,
             gid,
+            seccomp_profile,
         } => {
             // TODO - Config Parser
             // Load Default Config
@@ -90,12 +95,18 @@ fn main() -> Result<()> {
 
             info!("{setup_msg}");
 
+            // parse seccomp profile flag
+            let seccomp_profile = seccomp_profile
+                .map(seccomp::SeccompProfile::from_file)
+                .transpose()?;
+
             let opts = namespace::RunOptions {
                 command,
                 rootfs,
                 hostname,
                 cpu,
                 memory,
+                seccomp_profile,
             };
 
             let rootless = rootless::RootlessConfig::new(rootless, uid, gid)?;

@@ -124,6 +124,151 @@ fn rootless_custom_uid_is_applied() {
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1000");
 }
 
+// ── seccomp filtering (no root required, uses --rootless) ────────────────────
+
+#[test]
+fn seccomp_missing_profile_file_fails() {
+    let out = boxed()
+        .args([
+            "run",
+            "--rootless",
+            "--seccomp-profile",
+            "/nonexistent/profile.json",
+            "/bin/echo",
+            "hello",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("failed to read seccomp profile"),
+        "expected a read-failure message, got: {stderr}"
+    );
+}
+
+#[test]
+fn seccomp_malformed_profile_fails() {
+    let path = std::env::temp_dir().join(format!("boxed-malformed-{}.json", std::process::id()));
+    std::fs::write(&path, "{ this is not valid json").unwrap();
+
+    let out = boxed()
+        .args([
+            "run",
+            "--rootless",
+            "--seccomp-profile",
+            path.to_str().unwrap(),
+            "/bin/echo",
+            "hello",
+        ])
+        .output()
+        .unwrap();
+
+    std::fs::remove_file(&path).ok();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("failed to parse seccomp profile"),
+        "expected a parse-failure message, got: {stderr}"
+    );
+}
+
+#[test]
+fn seccomp_profile_with_args_condition_rejected() {
+    // tests/fixtures/seccomp-profile.json deliberately includes a `personality`
+    // rule with an `args` condition -- arg-conditional matching isn't
+    // supported, and a profile containing one must be rejected outright
+    // rather than silently applied without the condition.
+    let out = boxed()
+        .args([
+            "run",
+            "--rootless",
+            "--seccomp-profile",
+            "tests/fixtures/seccomp-profile.json",
+            "/bin/echo",
+            "hello",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("arg-conditional matching"),
+        "expected an arg-conditional rejection message, got: {stderr}"
+    );
+}
+
+#[test]
+fn seccomp_valid_profile_allows_execution() {
+    let out = boxed()
+        .args([
+            "run",
+            "--rootless",
+            "--seccomp-profile",
+            "tests/fixtures/seccomp-profile-valid.json",
+            "/bin/echo",
+            "hello",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hello");
+}
+
+#[test]
+fn seccomp_valid_profile_kills_disallowed_syscall() {
+    // tests/fixtures/seccomp-profile-valid.json explicitly maps `mount` to
+    // SCMP_ACT_KILL -- a real mount attempt (not the argument-less `mount`,
+    // which only lists /proc/mounts and never calls the mount(2) syscall)
+    // must die by SIGSYS under this custom profile, not just the default one.
+    //
+    // The grandchild that actually runs `mount` is killed by a real SIGSYS,
+    // but process::wait_for_child() converts that into a normal exit code
+    // (128 + signal) for boxed's own top-level process -- so what we observe
+    // here via Command::output() is a plain exit code, not a raw signal.
+    let out = boxed()
+        .args([
+            "run",
+            "--rootless",
+            "--seccomp-profile",
+            "tests/fixtures/seccomp-profile-valid.json",
+            "/bin/mount",
+            "--bind",
+            "/tmp",
+            "/tmp",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert_eq!(
+        out.status.code(),
+        Some(128 + libc::SIGSYS),
+        "expected exit code 128+SIGSYS (killed by SIGSYS)"
+    );
+}
+
+#[test]
+fn seccomp_default_filter_kills_mount() {
+    // No --seccomp-profile: the default denylist (DANGEROUS_SYSCALLS) applies,
+    // and mount is in it. See the comment above for why this is a plain exit
+    // code (128 + SIGSYS), not a raw signal, from Command::output()'s view.
+    let out = boxed()
+        .args(["run", "--rootless", "/bin/mount", "--bind", "/tmp", "/tmp"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert_eq!(
+        out.status.code(),
+        Some(128 + libc::SIGSYS),
+        "expected exit code 128+SIGSYS (killed by SIGSYS)"
+    );
+}
+
 #[test]
 fn run_without_command_fails() {
     let out = boxed().arg("run").output().unwrap();
