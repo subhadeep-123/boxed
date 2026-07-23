@@ -258,14 +258,7 @@ fn seccomp_default_filter_kills_mount() {
     // and mount is in it. See the comment above for why this is a plain exit
     // code (128 + SIGSYS), not a raw signal, from Command::output()'s view.
     let out = boxed()
-        .args([
-            "run",
-            "--rootless",
-            "/bin/mount",
-            "--bind",
-            "/tmp",
-            "/tmp",
-        ])
+        .args(["run", "--rootless", "/bin/mount", "--bind", "/tmp", "/tmp"])
         .output()
         .unwrap();
     assert!(!out.status.success());
