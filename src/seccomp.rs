@@ -1,8 +1,203 @@
-use anyhow::{Context, Result};
+use std::path::Path;
+
+use anyhow::{Context, Result, bail};
+use libc::{BPF_ABS, BPF_JEQ, BPF_JMP, BPF_K, BPF_LD, BPF_RET, BPF_W};
 use libc::{
-    BPF_ABS, BPF_JEQ, BPF_JMP, BPF_K, BPF_LD, BPF_RET, BPF_W, PR_SET_SECCOMP, SECCOMP_MODE_FILTER,
-    SECCOMP_RET_ALLOW, SECCOMP_RET_KILL_PROCESS, seccomp_data, sock_filter, sock_fprog,
+    PR_SET_SECCOMP, SECCOMP_MODE_FILTER, SECCOMP_RET_ALLOW, SECCOMP_RET_ERRNO, SECCOMP_RET_KILL,
+    SECCOMP_RET_KILL_PROCESS,
 };
+use libc::{seccomp_data, sock_filter, sock_fprog};
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeccompProfile {
+    pub default_action: String,
+    #[serde(default)]
+    pub architectures: Vec<String>,
+    #[serde(default)]
+    pub syscalls: Vec<SyscallRule>,
+}
+
+#[derive(Deserialize)]
+pub struct SyscallRule {
+    pub names: Vec<String>,
+    pub action: String,
+    #[serde(default)]
+    pub args: Vec<ArgRule>,
+}
+
+#[derive(Deserialize)]
+pub struct ArgRule {
+    pub index: u32,
+    pub value: u64,
+    pub value_two: Option<u64>,
+    pub op: String,
+}
+
+impl SeccompProfile {
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read seccomp profile at {}", path.display()))?;
+
+        let profile: SeccompProfile = serde_json::from_str(&content)
+            .with_context(|| format!("failed to parse seccomp profile at {}", path.display()))?;
+
+        profile
+            .validate()
+            .context("seccomp profile validation failed")?;
+
+        Ok(profile)
+    }
+
+    fn validate(&self) -> Result<()> {
+        for syscall in &self.syscalls {
+            syscall.validate()?;
+        }
+
+        if !self.architectures.is_empty()
+            && !self.architectures.iter().any(|a| a == "SCMP_ARCH_X86_64")
+        {
+            bail!("profile does not target SCMP_ARCH_X86_64, the only architecture boxed supports");
+        }
+        Ok(())
+    }
+}
+
+impl SyscallRule {
+    fn validate(&self) -> Result<()> {
+        if self.names.is_empty() {
+            bail!("syscall rule must contain at least one name");
+        }
+
+        for name in &self.names {
+            if syscall_number(name).is_none() {
+                bail!("unknown or unsupported syscall name: {name}");
+            }
+        }
+
+        if !self.args.is_empty() {
+            bail!(
+                "syscall rule for {:?} uses arg-conditional matching, which isn't supported yet",
+                self.names
+            );
+        }
+
+        if resolve_action(&self.action).is_none() {
+            bail!("unknown or unsupported action name: {}", self.action);
+        }
+        Ok(())
+    }
+}
+
+fn resolve_action(action: &str) -> Option<u32> {
+    match action {
+        "SCMP_ACT_ALLOW" => Some(SECCOMP_RET_ALLOW),
+        "SCMP_ACT_ERRNO" => Some(SECCOMP_RET_ERRNO),
+        "SCMP_ACT_KILL" => Some(SECCOMP_RET_KILL),
+        "SCMP_ACT_KILL_PROCESS" => Some(SECCOMP_RET_KILL_PROCESS),
+        _ => None,
+    }
+}
+
+fn syscall_number(name: &str) -> Option<i64> {
+    match name {
+        // system state / boot / power
+        "reboot" => Some(libc::SYS_reboot),
+        "acct" => Some(libc::SYS_acct),
+        "swapon" => Some(libc::SYS_swapon),
+        "swapoff" => Some(libc::SYS_swapoff),
+
+        // filesystem mounting — container escape surface
+        "mount" => Some(libc::SYS_mount),
+        "umount2" => Some(libc::SYS_umount2),
+        "pivot_root" => Some(libc::SYS_pivot_root),
+        "open_by_handle_at" => Some(libc::SYS_open_by_handle_at),
+        "sysfs" => Some(libc::SYS_sysfs),
+
+        // kernel module loading — arbitrary kernel code execution
+        "init_module" => Some(libc::SYS_init_module),
+        "finit_module" => Some(libc::SYS_finit_module),
+        "delete_module" => Some(libc::SYS_delete_module),
+
+        // kernel image loading
+        "kexec_load" => Some(libc::SYS_kexec_load),
+        "kexec_file_load" => Some(libc::SYS_kexec_file_load),
+
+        // debugging/introspection of other processes
+        "ptrace" => Some(libc::SYS_ptrace),
+        "process_vm_readv" => Some(libc::SYS_process_vm_readv),
+        "process_vm_writev" => Some(libc::SYS_process_vm_writev),
+        "kcmp" => Some(libc::SYS_kcmp),
+
+        // direct hardware I/O
+        "iopl" => Some(libc::SYS_iopl),
+        "ioperm" => Some(libc::SYS_ioperm),
+
+        // clock/time tampering
+        "settimeofday" => Some(libc::SYS_settimeofday),
+        "clock_settime" => Some(libc::SYS_clock_settime),
+        "clock_adjtime" => Some(libc::SYS_clock_adjtime),
+        "adjtimex" => Some(libc::SYS_adjtimex),
+
+        // kernel keyring
+        "add_key" => Some(libc::SYS_add_key),
+        "request_key" => Some(libc::SYS_request_key),
+        "keyctl" => Some(libc::SYS_keyctl),
+
+        // eBPF, perf, io_uring
+        "bpf" => Some(libc::SYS_bpf),
+        "perf_event_open" => Some(libc::SYS_perf_event_open),
+        "io_uring_setup" => Some(libc::SYS_io_uring_setup),
+        "io_uring_enter" => Some(libc::SYS_io_uring_enter),
+        "io_uring_register" => Some(libc::SYS_io_uring_register),
+
+        // NUMA memory policy
+        "mbind" => Some(libc::SYS_mbind),
+        "set_mempolicy" => Some(libc::SYS_set_mempolicy),
+        "get_mempolicy" => Some(libc::SYS_get_mempolicy),
+        "move_pages" => Some(libc::SYS_move_pages),
+
+        // namespace joining
+        "setns" => Some(libc::SYS_setns),
+
+        // obsolete/rarely-needed, historically privilege-adjacent
+        "quotactl" => Some(libc::SYS_quotactl),
+        "nfsservctl" => Some(libc::SYS_nfsservctl),
+        "lookup_dcookie" => Some(libc::SYS_lookup_dcookie),
+        "uselib" => Some(libc::SYS_uselib),
+        "ustat" => Some(libc::SYS_ustat),
+        "userfaultfd" => Some(libc::SYS_userfaultfd),
+        "_sysctl" => Some(libc::SYS__sysctl),
+        "personality" => Some(libc::SYS_personality),
+
+        // baseline / dynamic-linker syscalls — needed by any ALLOW rule
+        // for a real binary (see Step 2's echo/prlimit64 investigation)
+        "execve" => Some(libc::SYS_execve),
+        "read" => Some(libc::SYS_read),
+        "write" => Some(libc::SYS_write),
+        "close" => Some(libc::SYS_close),
+        "openat" => Some(libc::SYS_openat),
+        "fstat" => Some(libc::SYS_fstat),
+        "brk" => Some(libc::SYS_brk),
+        "mmap" => Some(libc::SYS_mmap),
+        "mprotect" => Some(libc::SYS_mprotect),
+        "munmap" => Some(libc::SYS_munmap),
+        "access" => Some(libc::SYS_access),
+        "arch_prctl" => Some(libc::SYS_arch_prctl),
+        "set_tid_address" => Some(libc::SYS_set_tid_address),
+        "set_robust_list" => Some(libc::SYS_set_robust_list),
+        "rseq" => Some(libc::SYS_rseq),
+        "getrandom" => Some(libc::SYS_getrandom),
+        "exit_group" => Some(libc::SYS_exit_group),
+        "prlimit64" => Some(libc::SYS_prlimit64),
+        "pread64" => Some(libc::SYS_pread64),
+
+        _ => None,
+    }
+}
 
 // AUDIT_ARCH_X86_64 isn't in the libc crate — from linux/audit.h,
 // EM_X86_64 | __AUDIT_ARCH_64BIT | __AUDIT_ARCH_LE

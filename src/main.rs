@@ -53,6 +53,9 @@ enum Commands {
             help = "GID to appear as inside the container"
         )]
         gid: Option<u32>,
+
+        #[arg(long, help = "Parse JSON file for secure computing configuration")]
+        seccomp_profile: Option<String>,
     },
 }
 
@@ -75,6 +78,7 @@ fn main() -> Result<()> {
             rootless,
             uid,
             gid,
+            seccomp_profile,
         } => {
             // TODO - Config Parser
             // Load Default Config
@@ -100,6 +104,10 @@ fn main() -> Result<()> {
             };
 
             let rootless = rootless::RootlessConfig::new(rootless, uid, gid)?;
+
+            if let Some(path) = seccomp_profile {
+                let profile = seccomp::SeccompProfile::from_file(path)?;
+            }
 
             let exit_code = namespace::run_in_namespace(opts, rootless)?;
             if exit_code == 0 {
