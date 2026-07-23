@@ -7,6 +7,7 @@ use libc::{
     SECCOMP_RET_KILL_PROCESS,
 };
 use libc::{seccomp_data, sock_filter, sock_fprog};
+use log::info;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -48,6 +49,7 @@ pub struct ResolvedProfile {
 impl SeccompProfile {
     pub fn from_file(path: impl AsRef<Path>) -> Result<ResolvedProfile> {
         let path = path.as_ref();
+        info!("loading seccomp profile from {}", path.display());
 
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read seccomp profile at {}", path.display()))?;
@@ -58,6 +60,11 @@ impl SeccompProfile {
         let profile = profile
             .resolve()
             .context("seccomp profile validation failed")?;
+
+        info!(
+            "seccomp profile validated: {} rule(s), default action resolved",
+            profile.rules.len()
+        );
 
         Ok(profile)
     }
@@ -381,10 +388,22 @@ fn install_filter(prog: &mut [libc::sock_filter]) -> Result<()> {
     if ret != 0 {
         return Err(nix::errno::Errno::last()).context("failed to install seccomp filter");
     }
+    info!("seccomp filter installed ({} BPF instructions)", prog.len());
     Ok(())
 }
 
 pub fn apply_default_filter(profile: Option<&ResolvedProfile>) -> Result<()> {
+    match profile {
+        Some(profile) => info!(
+            "applying custom seccomp filter ({} rule(s))",
+            profile.rules.len()
+        ),
+        None => info!(
+            "applying default seccomp filter ({} syscalls denied)",
+            DANGEROUS_SYSCALLS.len()
+        ),
+    }
+
     let mut prog = build_filter(profile);
 
     install_filter(&mut prog)
