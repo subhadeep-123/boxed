@@ -2,6 +2,9 @@
 name = "boxed"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "A container runtime built from scratch in Rust"
+repository = "https://github.com/subhadeep-123/boxed"
 
 [[bin]]
 name = "boxed"

@@ -1,0 +1,3 @@
+# boxed ships only a binary, not a library API, so clippy is free to
+# suggest fixes that would otherwise be considered a breaking API change.
+avoid-breaking-exported-api = false

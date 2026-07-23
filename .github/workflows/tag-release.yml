@@ -1,0 +1,47 @@
+name: Tag Release
+
+# Runs on every merge to main. Only acts when the merge bumped the
+# version in Cargo.toml to something not yet tagged - everything else
+# is a no-op. Tagging alone triggers release.yml, which builds and
+# publishes the GitHub Release.
+#
+# CHANGELOG.md is maintained by hand as part of the version-bump PR
+# (see CONTRIBUTING.md) - this workflow does not touch it.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag-release:
+    name: Tag on version bump
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether this version is already tagged
+        id: check
+        run: |
+          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Tag release commit
+        if: steps.check.outputs.new == 'true'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
