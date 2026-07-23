@@ -2,8 +2,13 @@ name: Tag Release
 
 # Runs on every merge to main. Only acts when the merge bumped the
 # version in Cargo.toml to something not yet tagged - everything else
-# is a no-op. Tagging alone triggers release.yml, which builds and
-# publishes the GitHub Release.
+# is a no-op. Tags the commit, then explicitly dispatches release.yml
+# for that tag.
+#
+# Why explicit dispatch instead of just pushing the tag: a tag pushed
+# using the built-in GITHUB_TOKEN does not trigger other workflows (a
+# deliberate GitHub Actions guard against workflow loops), so a plain
+# `git push origin vX.Y.Z` here would silently never build a release.
 #
 # CHANGELOG.md is maintained by hand as part of the version-bump PR
 # (see CONTRIBUTING.md) - this workflow does not touch it.
@@ -14,6 +19,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   tag-release:
@@ -45,3 +51,11 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           git tag "v$VERSION"
           git push origin "v$VERSION"
+
+      - name: Dispatch release build
+        if: steps.check.outputs.new == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          gh workflow run release.yml --ref "v$VERSION" -f "tag=v$VERSION"

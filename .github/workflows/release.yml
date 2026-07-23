@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and release (e.g. v0.3.0)'
+        required: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -17,6 +22,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -30,14 +37,17 @@ jobs:
 
       - name: Package
         run: |
-          ARCHIVE="boxed-${{ github.ref_name }}-x86_64-linux.tar.gz"
+          TAG="${{ inputs.tag || github.ref_name }}"
+          ARCHIVE="boxed-${TAG}-x86_64-linux.tar.gz"
           cp README.md target/release/
           tar -czf "$ARCHIVE" -C target/release boxed README.md
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.TAG }}
           files: ${{ env.ARCHIVE }}
           generate_release_notes: true
           fail_on_unmatched_files: true
