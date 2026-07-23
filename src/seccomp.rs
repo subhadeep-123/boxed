@@ -12,31 +12,41 @@ use serde::Deserialize;
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SeccompProfile {
-    pub default_action: String,
+    default_action: String,
     #[serde(default)]
-    pub architectures: Vec<String>,
+    architectures: Vec<String>,
     #[serde(default)]
-    pub syscalls: Vec<SyscallRule>,
+    syscalls: Vec<SyscallRule>,
 }
 
 #[derive(Deserialize)]
-pub struct SyscallRule {
-    pub names: Vec<String>,
-    pub action: String,
+struct SyscallRule {
+    names: Vec<String>,
+    action: String,
     #[serde(default)]
-    pub args: Vec<ArgRule>,
+    args: Vec<ArgRule>,
 }
 
 #[derive(Deserialize)]
-pub struct ArgRule {
-    pub index: u32,
-    pub value: u64,
-    pub value_two: Option<u64>,
-    pub op: String,
+#[allow(dead_code)]
+struct ArgRule {
+    index: u32,
+    value: u64,
+    value_two: Option<u64>,
+    op: String,
+}
+
+struct ResolveRule {
+    numbers: Vec<i64>,
+    action: u32,
+}
+pub struct ResolvedProfile {
+    rules: Vec<ResolveRule>,
+    default_action: u32,
 }
 
 impl SeccompProfile {
-    pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
+    pub fn from_file(path: impl AsRef<Path>) -> Result<ResolvedProfile> {
         let path = path.as_ref();
 
         let content = std::fs::read_to_string(path)
@@ -45,37 +55,44 @@ impl SeccompProfile {
         let profile: SeccompProfile = serde_json::from_str(&content)
             .with_context(|| format!("failed to parse seccomp profile at {}", path.display()))?;
 
-        profile
-            .validate()
+        let profile = profile
+            .resolve()
             .context("seccomp profile validation failed")?;
 
         Ok(profile)
     }
 
-    fn validate(&self) -> Result<()> {
-        for syscall in &self.syscalls {
-            syscall.validate()?;
-        }
-
+    fn resolve(&self) -> Result<ResolvedProfile> {
         if !self.architectures.is_empty()
             && !self.architectures.iter().any(|a| a == "SCMP_ARCH_X86_64")
         {
             bail!("profile does not target SCMP_ARCH_X86_64, the only architecture boxed supports");
         }
-        Ok(())
+
+        let rules = self
+            .syscalls
+            .iter()
+            .map(|rule| rule.resolve())
+            .collect::<Result<Vec<_>>>()?;
+
+        let default_action = resolve_action(&self.default_action).ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown or unsupported default action name: {}",
+                self.default_action
+            )
+        })?;
+
+        Ok(ResolvedProfile {
+            rules,
+            default_action,
+        })
     }
 }
 
 impl SyscallRule {
-    fn validate(&self) -> Result<()> {
+    fn resolve(&self) -> Result<ResolveRule> {
         if self.names.is_empty() {
             bail!("syscall rule must contain at least one name");
-        }
-
-        for name in &self.names {
-            if syscall_number(name).is_none() {
-                bail!("unknown or unsupported syscall name: {name}");
-            }
         }
 
         if !self.args.is_empty() {
@@ -85,10 +102,20 @@ impl SyscallRule {
             );
         }
 
-        if resolve_action(&self.action).is_none() {
-            bail!("unknown or unsupported action name: {}", self.action);
-        }
-        Ok(())
+        let action = resolve_action(&self.action).ok_or_else(|| {
+            anyhow::anyhow!("unknown or unsupported action name: {}", self.action)
+        })?;
+
+        let numbers = self
+            .names
+            .iter()
+            .map(|name| {
+                syscall_number(name)
+                    .ok_or_else(|| anyhow::anyhow!("unknown or unsupported syscall name: {name}"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(ResolveRule { numbers, action })
     }
 }
 
@@ -275,16 +302,10 @@ fn stmt(code: u16, k: u32) -> sock_filter {
 }
 
 fn jump(code: u16, jt: u8, jf: u8, k: u32) -> sock_filter {
-    sock_filter {
-        code,
-        jt: jt,
-        jf: jf,
-        k,
-    }
+    sock_filter { code, jt, jf, k }
 }
 
-// Assembly
-fn build_filter() -> Vec<sock_filter> {
+fn initialize_filters() -> Vec<sock_filter> {
     let mut prog = Vec::new();
 
     // 1. Arch gate - Must be the first two Instruction
@@ -310,14 +331,34 @@ fn build_filter() -> Vec<sock_filter> {
         std::mem::offset_of!(seccomp_data, nr) as u32,
     ));
 
-    // Step <4> one Pair Per Dangerous SYSCall - same shape as before,  RET payload flipped
-    for &nr in DANGEROUS_SYSCALLS {
-        prog.push(jump((BPF_JMP | BPF_JEQ | BPF_K) as u16, 0, 1, nr as u32));
-        prog.push(stmt((BPF_RET | BPF_K) as u16, SECCOMP_RET_KILL_PROCESS));
-    }
+    prog
+}
 
-    // Step <4> Fell through every pair without matching -> Allow
-    prog.push(stmt((BPF_RET | BPF_K) as u16, SECCOMP_RET_ALLOW));
+fn build_filter(profile: Option<&ResolvedProfile>) -> Vec<sock_filter> {
+    let mut prog = initialize_filters();
+
+    match profile {
+        Some(profile) => {
+            for rule in &profile.rules {
+                for nr in &rule.numbers {
+                    prog.push(jump((BPF_JMP | BPF_JEQ | BPF_K) as u16, 0, 1, *nr as u32));
+                    prog.push(stmt((BPF_RET | BPF_K) as u16, rule.action));
+                }
+            }
+
+            prog.push(stmt((BPF_RET | BPF_K) as u16, profile.default_action));
+        }
+        None => {
+            // Step <4> one Pair Per Dangerous SYSCall - same shape as before,  RET payload flipped
+            for &nr in DANGEROUS_SYSCALLS {
+                prog.push(jump((BPF_JMP | BPF_JEQ | BPF_K) as u16, 0, 1, nr as u32));
+                prog.push(stmt((BPF_RET | BPF_K) as u16, SECCOMP_RET_KILL_PROCESS));
+            }
+
+            // Step <4> Fell through every pair without matching -> Allow
+            prog.push(stmt((BPF_RET | BPF_K) as u16, SECCOMP_RET_ALLOW));
+        }
+    }
 
     prog
 }
@@ -343,7 +384,8 @@ fn install_filter(prog: &mut [libc::sock_filter]) -> Result<()> {
     Ok(())
 }
 
-pub fn apply_default_filter() -> Result<()> {
-    let mut prog = build_filter();
+pub fn apply_default_filter(profile: Option<&ResolvedProfile>) -> Result<()> {
+    let mut prog = build_filter(profile);
+
     install_filter(&mut prog)
 }

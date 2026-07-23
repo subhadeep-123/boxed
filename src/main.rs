@@ -95,19 +95,21 @@ fn main() -> Result<()> {
 
             info!("{setup_msg}");
 
+            // parse seccomp profile flag
+            let seccomp_profile = seccomp_profile
+                .map(seccomp::SeccompProfile::from_file)
+                .transpose()?;
+
             let opts = namespace::RunOptions {
                 command,
                 rootfs,
                 hostname,
                 cpu,
                 memory,
+                seccomp_profile,
             };
 
             let rootless = rootless::RootlessConfig::new(rootless, uid, gid)?;
-
-            if let Some(path) = seccomp_profile {
-                let profile = seccomp::SeccompProfile::from_file(path)?;
-            }
 
             let exit_code = namespace::run_in_namespace(opts, rootless)?;
             if exit_code == 0 {

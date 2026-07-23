@@ -9,7 +9,7 @@ use std::os::fd::OwnedFd;
 
 use crate::cgroups::Cgroup;
 use crate::rootless::RootlessConfig;
-use crate::seccomp::apply_default_filter;
+use crate::seccomp::{self, apply_default_filter};
 
 const STACK_SIZE: usize = 1024 * 1024; // 1MB
 
@@ -19,6 +19,7 @@ pub struct RunOptions {
     pub hostname: Option<String>,
     pub cpu: Option<u64>,
     pub memory: Option<u64>,
+    pub seccomp_profile: Option<seccomp::ResolvedProfile>,
 }
 
 struct ChildContext {
@@ -26,6 +27,7 @@ struct ChildContext {
     rootfs: Option<String>,
     hostname: Option<String>,
     sync_fd: OwnedFd,
+    seccomp_profile: Option<seccomp::ResolvedProfile>,
 }
 
 impl ChildContext {
@@ -34,12 +36,14 @@ impl ChildContext {
         rootfs: Option<String>,
         hostname: Option<String>,
         sync_fd: OwnedFd,
+        seccomp_profile: Option<seccomp::ResolvedProfile>,
     ) -> Self {
         Self {
             command: cmd,
             rootfs,
             hostname,
             sync_fd,
+            seccomp_profile,
         }
     }
 
@@ -69,7 +73,8 @@ impl ChildContext {
         // Set the calling thread's `no_new_privs` attribute.
         // Once set this option can not be unset
         set_no_new_privs().context("failed to set no_new_privs for child process")?;
-        apply_default_filter().context("failed to apply default seccomp filters")?;
+        apply_default_filter(self.seccomp_profile.as_ref())
+            .context("failed to apply default seccomp filters")?;
 
         let cmd_cstr = CString::new(self.command[0].as_str())
             .context("command name contains an embedded null byte")?;
@@ -174,7 +179,13 @@ pub fn run_in_namespace(opts: RunOptions, rootless: RootlessConfig) -> Result<i3
     // Read and write file descriptor for parent-child-synchronization
     let (read_fd, write_fd) = pipe().context("failed to create parent-child sync pipe")?;
 
-    let child_ctx = ChildContext::new(opts.command.to_vec(), opts.rootfs, opts.hostname, read_fd);
+    let child_ctx = ChildContext::new(
+        opts.command.to_vec(),
+        opts.rootfs,
+        opts.hostname,
+        read_fd,
+        opts.seccomp_profile,
+    );
 
     let child = runtime.spawn_child(child_ctx)?;
 
