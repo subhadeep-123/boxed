@@ -1,23 +1,27 @@
 # boxed
 
 [![CI](https://github.com/subhadeep-123/boxed/actions/workflows/ci.yml/badge.svg)](https://github.com/subhadeep-123/boxed/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg)](CODE_OF_CONDUCT.md)
 
-A container runtime built from scratch in Rust. Implements the same Linux primitives Docker uses under the hood — namespaces, cgroups v2, chroot, and capability dropping — with no abstraction layers hiding what's happening.
+A container runtime built from scratch in Rust. Implements the same Linux primitives Docker uses under the hood — namespaces, cgroups v2, chroot, capability dropping, and seccomp-bpf syscall filtering — with no abstraction layers hiding what's happening.
 
-The goal is not to ship a product. The goal is to understand, at the kernel level, what a container actually is.
+It started as an exercise in understanding, at the syscall level, what a container actually is. It's grown into a real rootless runtime since — see [CHANGELOG.md](CHANGELOG.md) for what's shipped, and [open issues](https://github.com/subhadeep-123/boxed/issues) for where it's headed (OCI compliance, a microVM backend).
 
 ---
 
 ## Architecture
 
 ```text
-boxed run --rootfs /tmp/minirootfs --cpu 50000 --memory 268435456 /bin/sh
+boxed run --rootfs /tmp/minirootfs --cpu 50000 --memory 268435456 --rootless /bin/sh
       │
       ├── process.rs      fork() + execvp() + waitpid(), signal forwarding
       ├── namespace.rs    clone() with CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWNS | CLONE_NEWNET
+      ├── rootless.rs     optional CLONE_NEWUSER, host<->container uid/gid mapping
       ├── rootfs.rs       chroot() into Alpine rootfs, mount /proc
       ├── cgroups.rs      write to /sys/fs/cgroup/ to cap CPU and memory
-      └── capabilities.rs drop dangerous capabilities via prctl()
+      ├── capabilities.rs drop dangerous capabilities via prctl()
+      └── seccomp.rs      compile an OCI seccomp profile (or default deny) into a BPF filter
 ```
 
 ---
@@ -54,6 +58,13 @@ sudo ./target/release/boxed run \
   --cpu 50000 \
   --memory 268435456 \
   /bin/sh
+
+# Same, but rootless — no sudo, via a user namespace (make nonroot wraps this)
+./target/release/boxed run --rootfs /tmp/minirootfs --rootless /bin/sh
+
+# Apply an OCI-style seccomp profile (see tests/fixtures for examples of
+# the format); omitting this flag still applies boxed's own default-deny filter
+sudo ./target/release/boxed run --seccomp-profile ./tests/fixtures/seccomp-profile-valid.json /bin/sh
 ```
 
 Inside the container:
@@ -71,12 +82,14 @@ Inside the container:
 
 | Module | What it does |
 | --- | --- |
-| `main.rs` | CLI entry point (`clap` derive). Parses `run` subcommand with `--rootfs`, `--cpu`, `--memory`. |
+| `main.rs` | CLI entry point (`clap` derive). Parses `run` subcommand with `--rootfs`, `--cpu`, `--memory`, `--rootless`, `--seccomp-profile`. |
 | `process.rs` | `fork()` + `execvp()` + `waitpid()`. Propagates exit codes. Signal forwarding. |
-| `namespace.rs` | `clone()` with PID, UTS, MNT, NET namespace flags. Sets hostname to `boxed`. |
+| `namespace.rs` | `clone()` with PID, UTS, MNT, NET (and optionally USER) namespace flags. Sets hostname to `boxed`. Parent/child sync over a pipe. |
+| `rootless.rs` | Optional `CLONE_NEWUSER`. Maps a chosen in-namespace UID/GID to the invoking host user, so `--rootless` needs no `sudo`. |
 | `rootfs.rs` | Bind-mounts rootfs, `chroot()`s into it, mounts `/proc` inside the container. |
 | `cgroups.rs` | Creates a cgroup under `/sys/fs/cgroup/boxed/<pid>`, writes `cpu.max` and `memory.max`. |
 | `capabilities.rs` | Drops all capabilities except a minimal safe set via `prctl()`. |
+| `seccomp.rs` | Parses an OCI seccomp profile into syscall rules, compiles them into a BPF program, and installs it via `prctl(PR_SET_SECCOMP)`. Defaults to deny-by-default with `no_new_privs` set. |
 
 ---
 
