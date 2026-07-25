@@ -82,7 +82,10 @@ fn mount_overlay(layers: &[PathBuf], paths: &OverlayPaths) -> Result<()> {
             .upper
             .to_str()
             .context("upper path is not valid UTF-8")?,
-        &paths.work.to_str().context("work path is not valid UTF-8")?
+        &paths
+            .work
+            .to_str()
+            .context("work path is not valid UTF-8")?
     );
     info!("OverlayFS mount data - {}", &data);
 
@@ -99,7 +102,7 @@ fn mount_overlay(layers: &[PathBuf], paths: &OverlayPaths) -> Result<()> {
     Ok(())
 }
 
-pub fn setup_overlay(image: &str) -> Result<PathBuf> {
+pub fn setup(image: &str) -> Result<PathBuf> {
     let image_dir = Path::new(image);
     let layers = discover_lower_layers(image_dir)?;
 

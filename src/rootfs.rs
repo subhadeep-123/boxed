@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use nix::mount::{MntFlags, MsFlags, mount, umount2};
 use nix::unistd::{chdir, pivot_root};
 
-pub fn setup_rootfs(rootfs_path: &str) -> Result<()> {
+pub fn setup(rootfs_path: &str) -> Result<()> {
     // Break shared propagation inherited from the parent namespace so that
     // mounts inside the container do not leak back to the host.
     mount(

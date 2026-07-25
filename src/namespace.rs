@@ -55,14 +55,14 @@ impl ChildContext {
     fn config_fs(&self) -> Result<()> {
         match (&self.image, &self.rootfs) {
             (Some(image), None) => {
-                let merged_path: PathBuf = crate::overlay::setup_overlay(image)
+                let merged_path: PathBuf = crate::overlay::setup(image)
                     .with_context(|| format!("Failed to setup overlay on {}", image))?;
 
                 let merged_path: &str = merged_path
                     .to_str()
                     .context("merged path is not valid UTF-8")?;
 
-                crate::rootfs::setup_rootfs(merged_path).with_context(|| {
+                crate::rootfs::setup(merged_path).with_context(|| {
                     format!(
                         "Failed to setup rootfs on overlay merged path {}",
                         merged_path
@@ -70,7 +70,7 @@ impl ChildContext {
                 })?;
             }
             (None, Some(rootfs)) => {
-                crate::rootfs::setup_rootfs(rootfs)
+                crate::rootfs::setup(rootfs)
                     .with_context(|| format!("Failed to setup rootfs on {}", rootfs))?;
             }
             (None, None) => {}
