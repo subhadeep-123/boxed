@@ -122,3 +122,88 @@ pub fn teardown(pid: Pid) -> Result<()> {
     fs::remove_dir_all(path)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("boxed-overlay-test-{name}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn discover_lower_layers_orders_topmost_layer_first() {
+        let image_dir = unique_temp_dir("order");
+        fs::create_dir_all(image_dir.join("00-base")).unwrap();
+        fs::create_dir_all(image_dir.join("01-app")).unwrap();
+
+        let layers = discover_lower_layers(&image_dir).unwrap();
+        fs::remove_dir_all(&image_dir).ok();
+
+        let names: Vec<_> = layers
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["01-app", "00-base"],
+            "the most-recently-added layer must be leftmost/topmost in the returned order"
+        );
+    }
+
+    #[test]
+    fn discover_lower_layers_single_layer() {
+        let image_dir = unique_temp_dir("single");
+        fs::create_dir_all(image_dir.join("00-base")).unwrap();
+
+        let layers = discover_lower_layers(&image_dir).unwrap();
+        fs::remove_dir_all(&image_dir).ok();
+
+        assert_eq!(layers.len(), 1);
+    }
+
+    #[test]
+    fn discover_lower_layers_empty_dir_errors() {
+        let image_dir = unique_temp_dir("empty");
+
+        let result = discover_lower_layers(&image_dir);
+        fs::remove_dir_all(&image_dir).ok();
+
+        let err = result.expect_err("an image dir with zero layers must be rejected");
+        assert!(
+            err.to_string().contains("no layers found"),
+            "expected a 'no layers found' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn discover_lower_layers_ignores_non_directory_entries() {
+        let image_dir = unique_temp_dir("files-only");
+        fs::write(image_dir.join("not-a-layer.txt"), b"hello").unwrap();
+
+        let result = discover_lower_layers(&image_dir);
+        fs::remove_dir_all(&image_dir).ok();
+
+        assert!(
+            result.is_err(),
+            "a directory containing only files, no subdirectories, has zero real layers"
+        );
+    }
+
+    #[test]
+    fn discover_lower_layers_missing_dir_errors() {
+        let missing =
+            std::env::temp_dir().join(format!("boxed-overlay-test-missing-{}", std::process::id()));
+
+        assert!(discover_lower_layers(&missing).is_err());
+    }
+
+    #[test]
+    fn get_overlay_root_is_deterministic_per_pid() {
+        assert_eq!(get_overlay_root(4821), get_overlay_root(4821));
+        assert_ne!(get_overlay_root(4821), get_overlay_root(4822));
+    }
+}

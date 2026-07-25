@@ -124,6 +124,27 @@ fn rootless_custom_uid_is_applied() {
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1000");
 }
 
+// ── --image / --rootfs mutual exclusivity (no root required) ─────────────────
+
+#[test]
+fn image_and_rootfs_together_rejected() {
+    let out = boxed()
+        .args([
+            "run",
+            "--image",
+            "/tmp/boxed-layers",
+            "--rootfs",
+            "/tmp/minirootfs",
+            "/bin/true",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "--image and --rootfs together should be rejected by clap's conflicts_with"
+    );
+}
+
 // ── seccomp filtering (no root required, uses --rootless) ────────────────────
 
 #[test]
@@ -503,4 +524,91 @@ fn run_memory_limit_applied() {
         .unwrap();
     // Process should be OOM-killed (non-zero exit).
     assert!(!out.status.success(), "process should have been OOM-killed");
+}
+
+// ── overlayfs layered root filesystem (requires root, Linux namespaces, and
+//    the layered fixture at /tmp/boxed-layers created by tmp_setup.sh) ───────
+
+#[test]
+#[ignore = "requires root, Linux namespaces, and layered fixture at /tmp/boxed-layers"]
+fn run_image_boots() {
+    let out = Command::new("sudo")
+        .args([
+            env!("CARGO_BIN_EXE_boxed"),
+            "run",
+            "--image",
+            "/tmp/boxed-layers",
+            "/bin/echo",
+            "hello",
+            "overlay",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hello overlay");
+}
+
+#[test]
+#[ignore = "requires root, Linux namespaces, and layered fixture at /tmp/boxed-layers"]
+fn run_image_merges_multiple_layers() {
+    // /tmp/boxed-layers/01-app contributes app-marker.txt on top of the
+    // 00-base Alpine layer -- confirms multiple lowerdirs actually stack
+    // into one merged view instead of only the base layer being used.
+    let out = Command::new("sudo")
+        .args([
+            env!("CARGO_BIN_EXE_boxed"),
+            "run",
+            "--image",
+            "/tmp/boxed-layers",
+            "/bin/cat",
+            "/app-marker.txt",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "app-layer-marker"
+    );
+}
+
+#[test]
+#[ignore = "requires root, Linux namespaces, and layered fixture at /tmp/boxed-layers"]
+fn run_image_cow_does_not_affect_base_layer() {
+    // A file written inside the container must land only in the ephemeral
+    // upper layer -- the read-only 00-base layer on the host must remain
+    // untouched after the container exits.
+    let marker = format!("cow-test-{}.txt", std::process::id());
+    let out = Command::new("sudo")
+        .args([
+            env!("CARGO_BIN_EXE_boxed"),
+            "run",
+            "--image",
+            "/tmp/boxed-layers",
+            "/bin/sh",
+            "-c",
+            &format!("echo written-in-container > /{marker}"),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let leaked_to_base = std::path::Path::new("/tmp/boxed-layers/00-base").join(&marker);
+    assert!(
+        !leaked_to_base.exists(),
+        "file written inside the container leaked into the read-only base layer: {}",
+        leaked_to_base.display()
+    );
 }
