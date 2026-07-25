@@ -383,6 +383,74 @@ fn run_exit_code_propagates() {
     );
 }
 
+// ── rootfs isolation (pivot_root, requires root + Linux namespaces) ──────────
+
+#[test]
+#[ignore = "requires root, Linux namespaces, and Alpine rootfs at /tmp/minirootfs"]
+fn run_proc_mounts_shows_only_container_mounts() {
+    let out = Command::new("sudo")
+        .args([
+            env!("CARGO_BIN_EXE_boxed"),
+            "run",
+            "--rootfs",
+            "/tmp/minirootfs",
+            "/bin/cat",
+            "/proc/mounts",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mount_count = stdout.lines().count();
+    assert!(
+        mount_count <= 2,
+        "expected only the container's own mounts (/ and /proc), got {mount_count}:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(" /proc "),
+        "expected a /proc mount inside the container:\n{stdout}"
+    );
+}
+
+#[test]
+#[ignore = "requires root, Linux namespaces, and Alpine rootfs at /tmp/minirootfs"]
+fn run_old_root_is_unreachable() {
+    let marker_path = format!("/tmp/boxed_test_marker_{}", std::process::id());
+    std::fs::write(&marker_path, "host-only content").expect("failed to write host marker file");
+
+    let out = Command::new("sudo")
+        .args([
+            env!("CARGO_BIN_EXE_boxed"),
+            "run",
+            "--rootfs",
+            "/tmp/minirootfs",
+            "/bin/sh",
+            "-c",
+            &format!("test -f {marker_path} && echo FOUND || echo NOTFOUND"),
+        ])
+        .output()
+        .unwrap();
+
+    std::fs::remove_file(&marker_path).ok();
+
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "NOTFOUND",
+        "a file that only exists on the host filesystem should be unreachable \
+         from inside the container after pivot_root"
+    );
+}
+
 #[test]
 #[ignore = "environment-dependent: relies on cgroups v2 NOT being delegated \
             to the invoking (non-root) user, so cgroup setup fails after the \
