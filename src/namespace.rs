@@ -9,6 +9,7 @@ use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 
 use crate::cgroups::Cgroup;
+use crate::overlay;
 use crate::rootless::RootlessConfig;
 use crate::seccomp::{self, apply_default_filter};
 
@@ -213,6 +214,8 @@ pub fn run_in_namespace(opts: RunOptions, rootless: RootlessConfig) -> Result<i3
     // Read and write file descriptor for parent-child-synchronization
     let (read_fd, write_fd) = pipe().context("failed to create parent-child sync pipe")?;
 
+    let overlay_used = opts.image.is_some();
+
     let child_ctx = ChildContext::new(
         opts.command.to_vec(),
         opts.rootfs,
@@ -237,7 +240,14 @@ pub fn run_in_namespace(opts: RunOptions, rootless: RootlessConfig) -> Result<i3
     write(&write_fd, &[1]).context("failed to signal child to proceed")?;
     drop(write_fd);
 
-    runtime.wait_for_child(child)
+    let exit_code = runtime.wait_for_child(child);
+
+    // Overlay teardown
+    if overlay_used && let Err(e) = overlay::teardown(child) {
+        error!("overlay teardown failed: {:?}", e);
+    }
+
+    exit_code
 }
 
 #[cfg(test)]

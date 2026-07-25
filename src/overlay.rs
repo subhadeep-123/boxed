@@ -1,6 +1,9 @@
 use anyhow::{Context, Result, bail};
 use log::info;
-use nix::mount::{MsFlags, mount};
+use nix::{
+    mount::{MsFlags, mount},
+    unistd::Pid,
+};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -39,12 +42,12 @@ struct OverlayPaths {
     merged: PathBuf,
 }
 
+fn get_overlay_root(id: u32) -> PathBuf {
+    std::env::temp_dir().join(format!("{}-overlay-{}", env!("CARGO_PKG_NAME"), id))
+}
+
 fn create_overlay_scratch() -> Result<OverlayPaths> {
-    let root = std::env::temp_dir().join(format!(
-        "{}-overlay-{}",
-        env!("CARGO_PKG_NAME"),
-        std::process::id()
-    ));
+    let root = get_overlay_root(std::process::id());
 
     let upper = root.join("upper");
     let work = root.join("work");
@@ -111,4 +114,11 @@ pub fn setup(image: &str) -> Result<PathBuf> {
     mount_overlay(&layers, &overlay_paths)?;
 
     Ok(overlay_paths.merged)
+}
+
+pub fn teardown(pid: Pid) -> Result<()> {
+    let path = get_overlay_root(pid.as_raw() as u32);
+    info!("Overlay teardown, dropping - {}", path.display());
+    fs::remove_dir_all(path)?;
+    Ok(())
 }
