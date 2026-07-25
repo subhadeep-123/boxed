@@ -81,16 +81,16 @@ fn mount_overlay(layers: &[PathBuf], paths: &OverlayPaths) -> Result<()> {
     let data = format!(
         "lowerdir={},upperdir={},workdir={}",
         lowerdir_string(layers)?,
-        &paths
+        paths
             .upper
             .to_str()
             .context("upper path is not valid UTF-8")?,
-        &paths
+        paths
             .work
             .to_str()
             .context("work path is not valid UTF-8")?
     );
-    info!("OverlayFS mount data - {}", &data);
+    info!("OverlayFS mount data - {}", data);
 
     mount(
         Some("overlay"),
