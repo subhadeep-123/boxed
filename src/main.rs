@@ -4,6 +4,7 @@ use log::info;
 
 mod capabilities;
 mod cgroups;
+mod config;
 mod namespace;
 mod process;
 mod rootfs;
@@ -65,6 +66,8 @@ fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    config::create_config_dir()?;
 
     info!("Starting Container");
 
