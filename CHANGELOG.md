@@ -6,6 +6,15 @@ follow [Conventional Commits](https://www.conventionalcommits.org/).
 
 ## [Unreleased]
 
+### Features
+
+- Container root isolation now uses `pivot_root` instead of `chroot`. `chroot`
+  only redirects path resolution for `/`; it never removed the host's mount
+  table, which is copied into the container's mount namespace at `clone()`
+  time. `pivot_root` swaps which mount is root and detaches the old one via
+  `umount2(MNT_DETACH)`, so the host filesystem is genuinely unreachable from
+  inside the container rather than merely hidden from view.
+
 ## [0.3.0] - 2026-07-24
 
 Adds seccomp-bpf syscall filtering.
