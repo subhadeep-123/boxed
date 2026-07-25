@@ -6,8 +6,10 @@ use nix::sys::signal::Signal;
 use nix::unistd::{Pid, pipe, read, sethostname, write};
 use std::ffi::CString;
 use std::os::fd::OwnedFd;
+use std::path::PathBuf;
 
 use crate::cgroups::Cgroup;
+use crate::overlay;
 use crate::rootless::RootlessConfig;
 use crate::seccomp::{self, apply_default_filter};
 
@@ -16,6 +18,7 @@ const STACK_SIZE: usize = 1024 * 1024; // 1MB
 pub struct RunOptions {
     pub command: Vec<String>,
     pub rootfs: Option<String>,
+    pub image: Option<String>,
     pub hostname: Option<String>,
     pub cpu: Option<u64>,
     pub memory: Option<u64>,
@@ -25,6 +28,7 @@ pub struct RunOptions {
 struct ChildContext {
     command: Vec<String>,
     rootfs: Option<String>,
+    image: Option<String>,
     hostname: Option<String>,
     sync_fd: OwnedFd,
     seccomp_profile: Option<seccomp::ResolvedProfile>,
@@ -34,6 +38,7 @@ impl ChildContext {
     fn new(
         cmd: Vec<String>,
         rootfs: Option<String>,
+        image: Option<String>,
         hostname: Option<String>,
         sync_fd: OwnedFd,
         seccomp_profile: Option<seccomp::ResolvedProfile>,
@@ -41,10 +46,41 @@ impl ChildContext {
         Self {
             command: cmd,
             rootfs,
+            image,
             hostname,
             sync_fd,
             seccomp_profile,
         }
+    }
+
+    fn config_fs(&self) -> Result<()> {
+        match (&self.image, &self.rootfs) {
+            (Some(image), None) => {
+                let merged_path: PathBuf = crate::overlay::setup(image)
+                    .with_context(|| format!("Failed to setup overlay on {}", image))?;
+
+                let merged_path: &str = merged_path
+                    .to_str()
+                    .context("merged path is not valid UTF-8")?;
+
+                crate::rootfs::setup(merged_path).with_context(|| {
+                    format!(
+                        "Failed to setup rootfs on overlay merged path {}",
+                        merged_path
+                    )
+                })?;
+            }
+            (None, Some(rootfs)) => {
+                crate::rootfs::setup(rootfs)
+                    .with_context(|| format!("Failed to setup rootfs on {}", rootfs))?;
+            }
+            (None, None) => {}
+            (Some(_), Some(_)) => {
+                unreachable!("clap guarantees --image and --rootfs are mutually exclusive");
+            }
+        }
+
+        Ok(())
     }
 
     fn enter(&self) -> Result<()> {
@@ -63,9 +99,8 @@ impl ChildContext {
         sethostname(self.hostname.as_deref().unwrap_or("boxed"))
             .context("failed to set hostname")?;
 
-        if let Some(path) = &self.rootfs {
-            crate::rootfs::setup_rootfs(path).context("rootfs setup failed")?;
-        }
+        // Do Filesystem configuration based on --rootfs/--image
+        self.config_fs()?;
 
         // Drop extra capabilities for the container
         crate::capabilities::drop_capabilities().context("failed to drop capabilities")?;
@@ -179,9 +214,12 @@ pub fn run_in_namespace(opts: RunOptions, rootless: RootlessConfig) -> Result<i3
     // Read and write file descriptor for parent-child-synchronization
     let (read_fd, write_fd) = pipe().context("failed to create parent-child sync pipe")?;
 
+    let overlay_used = opts.image.is_some();
+
     let child_ctx = ChildContext::new(
         opts.command.to_vec(),
         opts.rootfs,
+        opts.image,
         opts.hostname,
         read_fd,
         opts.seccomp_profile,
@@ -202,7 +240,14 @@ pub fn run_in_namespace(opts: RunOptions, rootless: RootlessConfig) -> Result<i3
     write(&write_fd, &[1]).context("failed to signal child to proceed")?;
     drop(write_fd);
 
-    runtime.wait_for_child(child)
+    let exit_code = runtime.wait_for_child(child);
+
+    // Overlay teardown
+    if overlay_used && let Err(e) = overlay::teardown(child) {
+        error!("overlay teardown failed: {:?}", e);
+    }
+
+    exit_code
 }
 
 #[cfg(test)]

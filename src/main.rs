@@ -4,7 +4,9 @@ use log::info;
 
 mod capabilities;
 mod cgroups;
+mod config;
 mod namespace;
+mod overlay;
 mod process;
 mod rootfs;
 mod rootless;
@@ -24,6 +26,13 @@ enum Commands {
     Run {
         #[arg(long, help = "Path to root filesystem")]
         rootfs: Option<String>,
+
+        #[arg(
+            long,
+            conflicts_with = "rootfs",
+            help = "Path to a directory of stacked overlay layers"
+        )]
+        image: Option<String>,
 
         #[arg(long, help = "CPU quota in microseconds (per 100000us period)")]
         cpu: Option<u64>,
@@ -66,11 +75,14 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    config::create_config_dir()?;
+
     info!("Starting Container");
 
     match cli.command {
         Commands::Run {
             rootfs,
+            image,
             cpu,
             memory,
             command,
@@ -85,7 +97,7 @@ fn main() -> Result<()> {
             // Render with ASCI
             // Initial Logs + Telemetry
             let mut setup_msg = format!(
-                "container config: rootfs={rootfs:?} cpu={cpu:?} memory={memory:?} hostname={hostname:?}",
+                "container config: rootfs={rootfs:?} image={image:?} cpu={cpu:?} memory={memory:?} hostname={hostname:?}",
             );
             if rootless {
                 setup_msg.push_str(" with rootless mode enabled");
@@ -103,6 +115,7 @@ fn main() -> Result<()> {
             let opts = namespace::RunOptions {
                 command,
                 rootfs,
+                image,
                 hostname,
                 cpu,
                 memory,

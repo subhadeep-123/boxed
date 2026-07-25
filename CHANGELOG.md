@@ -6,6 +6,20 @@ follow [Conventional Commits](https://www.conventionalcommits.org/).
 
 ## [Unreleased]
 
+Adds a layered overlayfs root filesystem as an alternative to a flat `--rootfs`.
+
+### Features
+
+- `--image <DIR>` stacks ordered layer subdirectories with overlayfs
+  (read-only lowers, an ephemeral per-run upper/work scratch) into one
+  merged directory, which then pivot_roots through the existing
+  `setup_rootfs` unchanged. This is what makes container image layers and
+  copy-on-write isolation possible, instead of mutating a single flat
+  rootfs directly. `--image` and `--rootfs` are mutually exclusive.
+- Ephemeral scratch directories are torn down on the host after the
+  container exits, re-deriving their path from the child's PID rather
+  than needing it passed across the process boundary.
+
 ## [0.3.1] - 2026-07-25
 
 Replaces chroot with pivot_root for real root filesystem isolation.
