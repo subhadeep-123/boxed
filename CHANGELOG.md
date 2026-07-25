@@ -6,6 +6,10 @@ follow [Conventional Commits](https://www.conventionalcommits.org/).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-25
+
+Replaces chroot with pivot_root for real root filesystem isolation.
+
 ### Features
 
 - Container root isolation now uses `pivot_root` instead of `chroot`. `chroot`
