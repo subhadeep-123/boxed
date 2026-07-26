@@ -17,18 +17,12 @@ struct RequiredController {
 pub struct CgroupConfig {
     pub cpu_quota: Option<u64>,
     pub memory_max: Option<u64>,
+    pub pids_limit: Option<u64>,
 }
 
 impl CgroupConfig {
     pub fn is_noop(&self) -> bool {
-        self.cpu_quota.is_none() && self.memory_max.is_none()
-    }
-
-    pub fn new(cpu_quota: Option<u64>, memory_max: Option<u64>) -> Self {
-        CgroupConfig {
-            cpu_quota,
-            memory_max,
-        }
+        self.cpu_quota.is_none() && self.memory_max.is_none() && self.pids_limit.is_none()
     }
 
     fn required_controllers(&self) -> Vec<RequiredController> {
@@ -44,6 +38,13 @@ impl CgroupConfig {
             required.push(RequiredController {
                 name: "memory",
                 flag: "--memory",
+            });
+        }
+
+        if self.pids_limit.is_some() {
+            required.push(RequiredController {
+                name: "pids",
+                flag: "--pids-limit",
             });
         }
 
@@ -125,6 +126,10 @@ impl Cgroup {
             write_controller(&path, "memory.max", memory.to_string())?;
         }
 
+        if let Some(pids_limit) = config.pids_limit {
+            write_controller(&path, "pids.max", pids_limit.to_string())?;
+        }
+
         Ok(Self { path })
     }
 
@@ -155,15 +160,18 @@ mod tests {
         let config = CgroupConfig {
             cpu_quota: None,
             memory_max: None,
+            pids_limit: None,
         };
         assert!(config.cpu_quota.is_none());
         assert!(config.memory_max.is_none());
+        assert!(config.pids_limit.is_none());
     }
 
     #[test]
     fn config_with_values() {
         let config = CgroupConfig {
             cpu_quota: Some(50_000),
+            pids_limit: Some(100),
             memory_max: Some(256 * 1024 * 1024),
         };
         assert_eq!(config.cpu_quota, Some(50_000));
@@ -196,6 +204,7 @@ mod tests {
     fn create_and_destroy() {
         let config = CgroupConfig {
             cpu_quota: Some(50_000),
+            pids_limit: Some(100),
             memory_max: Some(64 * 1024 * 1024),
         };
         let cg = Cgroup::create(99997, &config).expect("create failed");
@@ -209,6 +218,7 @@ mod tests {
     fn create_cpu_only() {
         let config = CgroupConfig {
             cpu_quota: Some(25_000),
+            pids_limit: None,
             memory_max: None,
         };
         let cg = Cgroup::create(99998, &config).expect("create failed");
@@ -222,6 +232,7 @@ mod tests {
         let config = CgroupConfig {
             cpu_quota: None,
             memory_max: Some(32 * 1024 * 1024),
+            pids_limit: None,
         };
         let cg = Cgroup::create(99999, &config).expect("create failed");
         assert!(cg.path.exists());

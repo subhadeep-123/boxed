@@ -34,11 +34,8 @@ enum Commands {
         )]
         image: Option<String>,
 
-        #[arg(long, help = "CPU quota in microseconds (per 100000us period)")]
-        cpu: Option<u64>,
-
-        #[arg(long, help = "Memory limit in bytes")]
-        memory: Option<u64>,
+        #[command(flatten)]
+        limits: CgroupArgs,
 
         #[arg(required = true, help = "Command to run inside the container")]
         command: Vec<String>,
@@ -68,6 +65,41 @@ enum Commands {
     },
 }
 
+// Cgroup limits. `help_heading` is set per-argument rather than with
+// `next_help_heading` on the struct: the latter also applies to every
+// argument declared after the `flatten` in the parent, which drags
+// unrelated flags under this heading. Doc comments are avoided here too —
+// clap turns them into the subcommand's `about` text.
+#[derive(clap::Args, Debug)]
+struct CgroupArgs {
+    #[arg(
+        long,
+        help_heading = "Resource limits",
+        help = "CPU quota in microseconds (per 100000us period)"
+    )]
+    cpu: Option<u64>,
+
+    #[arg(long, help_heading = "Resource limits", help = "Memory limit in bytes")]
+    memory: Option<u64>,
+
+    #[arg(
+        long,
+        help_heading = "Resource limits",
+        help = "Max tasks; threads count, and PID 1 is included"
+    )]
+    pids_limit: Option<u64>,
+}
+
+impl From<CgroupArgs> for cgroups::CgroupConfig {
+    fn from(value: CgroupArgs) -> Self {
+        Self {
+            cpu_quota: value.cpu,
+            memory_max: value.memory,
+            pids_limit: value.pids_limit,
+        }
+    }
+}
+
 fn main() -> Result<()> {
     env_logger::Builder::from_default_env()
         .format_timestamp_millis()
@@ -83,8 +115,7 @@ fn main() -> Result<()> {
         Commands::Run {
             rootfs,
             image,
-            cpu,
-            memory,
+            limits,
             command,
             hostname,
             rootless,
@@ -97,7 +128,7 @@ fn main() -> Result<()> {
             // Render with ASCI
             // Initial Logs + Telemetry
             let mut setup_msg = format!(
-                "container config: rootfs={rootfs:?} image={image:?} cpu={cpu:?} memory={memory:?} hostname={hostname:?}",
+                "container config: rootfs={rootfs:?} image={image:?} limits={limits:?} hostname={hostname:?}",
             );
             if rootless {
                 setup_msg.push_str(" with rootless mode enabled");
@@ -117,8 +148,7 @@ fn main() -> Result<()> {
                 rootfs,
                 image,
                 hostname,
-                cpu,
-                memory,
+                limits: limits.into(),
                 seccomp_profile,
             };
 

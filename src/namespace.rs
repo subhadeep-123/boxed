@@ -8,7 +8,7 @@ use std::ffi::CString;
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 
-use crate::cgroups::Cgroup;
+use crate::cgroups::{Cgroup, CgroupConfig};
 use crate::overlay;
 use crate::rootless::RootlessConfig;
 use crate::seccomp::{self, apply_default_filter};
@@ -20,8 +20,7 @@ pub struct RunOptions {
     pub rootfs: Option<String>,
     pub image: Option<String>,
     pub hostname: Option<String>,
-    pub cpu: Option<u64>,
-    pub memory: Option<u64>,
+    pub limits: CgroupConfig,
     pub seccomp_profile: Option<seccomp::ResolvedProfile>,
 }
 
@@ -126,18 +125,16 @@ impl ChildContext {
 }
 
 struct RuntimeConfig {
-    cpu: Option<u64>,
-    memory: Option<u64>,
+    limits: CgroupConfig,
     flags: CloneFlags,
 
     rootless: RootlessConfig,
 }
 
 impl RuntimeConfig {
-    fn new(cpu: Option<u64>, memory: Option<u64>, rootless: RootlessConfig) -> Self {
+    fn new(limits: CgroupConfig, rootless: RootlessConfig) -> Self {
         Self {
-            cpu,
-            memory,
+            limits,
             flags: Self::build_clone_flags(rootless.enabled),
             rootless,
         }
@@ -157,12 +154,11 @@ impl RuntimeConfig {
     }
 
     fn setup_cgroup(&self, pid: Pid) -> Result<Option<Cgroup>> {
-        let config = crate::cgroups::CgroupConfig::new(self.cpu, self.memory);
-        if config.is_noop() {
+        if self.limits.is_noop() {
             return Ok(None);
         }
 
-        let cg = Cgroup::create(pid.as_raw() as u32, &config)?;
+        let cg = Cgroup::create(pid.as_raw() as u32, &self.limits)?;
         cg.add_process(pid.as_raw() as u32)?;
 
         Ok(Some(cg))
@@ -205,7 +201,7 @@ impl RuntimeConfig {
 }
 
 pub fn run_in_namespace(opts: RunOptions, rootless: RootlessConfig) -> Result<i32> {
-    let runtime = RuntimeConfig::new(opts.cpu, opts.memory, rootless);
+    let runtime = RuntimeConfig::new(opts.limits, rootless);
 
     // Read and write file descriptor for parent-child-synchronization
     let (read_fd, write_fd) = pipe().context("failed to create parent-child sync pipe")?;
