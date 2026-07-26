@@ -157,14 +157,10 @@ impl RuntimeConfig {
     }
 
     fn setup_cgroup(&self, pid: Pid) -> Result<Option<Cgroup>> {
-        if self.cpu.is_none() && self.memory.is_none() {
+        let config = crate::cgroups::CgroupConfig::new(self.cpu, self.memory);
+        if config.is_noop() {
             return Ok(None);
         }
-
-        let config = crate::cgroups::CgroupConfig {
-            cpu_quota: self.cpu,
-            memory_max: self.memory,
-        };
 
         let cg = Cgroup::create(pid.as_raw() as u32, &config)?;
         cg.add_process(pid.as_raw() as u32)?;

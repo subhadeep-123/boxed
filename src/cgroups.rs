@@ -1,16 +1,35 @@
-use anyhow::Context;
-use anyhow::Result;
-use std::{fs, path::PathBuf};
+use anyhow::{Context, Result};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 pub struct CgroupConfig {
     pub cpu_quota: Option<u64>,
     pub memory_max: Option<u64>,
 }
 
+impl CgroupConfig {
+    pub fn is_noop(&self) -> bool {
+        self.cpu_quota.is_none() && self.memory_max.is_none()
+    }
+
+    pub fn new(cpu_quota: Option<u64>, memory_max: Option<u64>) -> Self {
+        CgroupConfig {
+            cpu_quota,
+            memory_max,
+        }
+    }
+}
+
 pub struct Cgroup {
     pub path: PathBuf,
 }
 
+fn write_controller(cgroup_dir: &Path, filename: &str, value: impl AsRef<[u8]>) -> Result<()> {
+    fs::write(cgroup_dir.join(filename), value)
+        .with_context(|| format!("failed to write {}", filename))
+}
 impl Cgroup {
     pub fn create(pid: u32, config: &CgroupConfig) -> Result<Self> {
         let parent = PathBuf::from("/sys/fs/cgroup/boxed");
@@ -24,13 +43,11 @@ impl Cgroup {
             .with_context(|| format!("failed to create cgroup dir at {:?}", path))?;
 
         if let Some(quota) = config.cpu_quota {
-            let value = format!("{} 100000", quota);
-            fs::write(path.join("cpu.max"), value).context("failed to write cpu.max")?;
+            write_controller(&path, "cpu.max", format!("{} 100000", quota))?;
         }
 
         if let Some(memory) = config.memory_max {
-            fs::write(path.join("memory.max"), memory.to_string())
-                .context("failed to write memory.max")?;
+            write_controller(&path, "memory.max", memory.to_string())?;
         }
 
         Ok(Self { path })
