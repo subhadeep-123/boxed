@@ -1,8 +1,18 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use std::{
     fs,
     path::{Path, PathBuf},
 };
+
+/// Parent cgroup holding one child cgroup per container.
+const CGROUP_ROOT: &str = "/sys/fs/cgroup/boxed";
+
+/// A cgroup v2 controller paired with the CLI flag that requests it. Kept
+/// together so the flag named in an error can't drift from the controller.
+struct RequiredController {
+    name: &'static str,
+    flag: &'static str,
+}
 
 pub struct CgroupConfig {
     pub cpu_quota: Option<u64>,
@@ -20,6 +30,25 @@ impl CgroupConfig {
             memory_max,
         }
     }
+
+    fn required_controllers(&self) -> Vec<RequiredController> {
+        let mut required = Vec::new();
+
+        if self.cpu_quota.is_some() {
+            required.push(RequiredController {
+                name: "cpu",
+                flag: "--cpu",
+            });
+        }
+        if self.memory_max.is_some() {
+            required.push(RequiredController {
+                name: "memory",
+                flag: "--memory",
+            });
+        }
+
+        required
+    }
 }
 
 pub struct Cgroup {
@@ -30,15 +59,61 @@ fn write_controller(cgroup_dir: &Path, filename: &str, value: impl AsRef<[u8]>) 
     fs::write(cgroup_dir.join(filename), value)
         .with_context(|| format!("failed to write {}", filename))
 }
+
+/// Reads a `cgroup.controllers` file into the controller names it lists.
+fn read_controllers(path: &Path) -> Result<Vec<String>> {
+    Ok(fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Checks every required controller was delegated to us, and builds the
+/// `cgroup.subtree_control` line that enables them.
+fn validate_controllers(required: &[RequiredController], available: &[String]) -> Result<String> {
+    for controller in required {
+        if !available.iter().any(|a| a.as_str() == controller.name) {
+            bail!(
+                "{} requested, but the `{}` controller is not available to {} — it lists only: {}",
+                controller.flag,
+                controller.name,
+                CGROUP_ROOT,
+                available.join(" ")
+            );
+        }
+    }
+
+    Ok(required
+        .iter()
+        .map(|c| format!("+{}", c.name))
+        .collect::<Vec<_>>()
+        .join(" "))
+}
+
 impl Cgroup {
     pub fn create(pid: u32, config: &CgroupConfig) -> Result<Self> {
-        let parent = PathBuf::from("/sys/fs/cgroup/boxed");
+        let parent = PathBuf::from(CGROUP_ROOT);
         fs::create_dir_all(&parent).context("failed to create boxed cgroup dir")?;
-        // cgroups v2: controllers must be enabled in the parent before child cgroups can use them
-        fs::write(parent.join("cgroup.subtree_control"), "+cpu +memory")
-            .context("failed to enable cgroup controllers — are cpu/memory available in /sys/fs/cgroup/cgroup.subtree_control?")?;
 
-        let path = PathBuf::from(format!("/sys/fs/cgroup/boxed/{}", pid));
+        // A cgroup's own cgroup.controllers lists what its parent delegated to
+        // it, which is what we can actually enable — not the full set the
+        // kernel supports.
+        let available = read_controllers(&parent.join("cgroup.controllers"))?;
+        let required = config.required_controllers();
+
+        // cgroups v2: controllers must be enabled in the parent before child cgroups can use them
+        let subtree_control = validate_controllers(&required, &available)?;
+        let subtree_control_path = parent.join("cgroup.subtree_control");
+        fs::write(&subtree_control_path, &subtree_control).with_context(|| {
+            format!(
+                "failed to write {:?} to {}",
+                subtree_control,
+                subtree_control_path.display()
+            )
+        })?;
+
+        let path = parent.join(pid.to_string());
         fs::create_dir_all(&path)
             .with_context(|| format!("failed to create cgroup dir at {:?}", path))?;
 
