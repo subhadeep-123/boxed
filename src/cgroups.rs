@@ -18,11 +18,17 @@ pub struct CgroupConfig {
     pub cpu_quota: Option<u64>,
     pub memory_max: Option<u64>,
     pub pids_limit: Option<u64>,
+    pub cpuset_cpus: Option<String>,
+    pub cpuset_mems: Option<String>,
 }
 
 impl CgroupConfig {
     pub fn is_noop(&self) -> bool {
-        self.cpu_quota.is_none() && self.memory_max.is_none() && self.pids_limit.is_none()
+        self.cpu_quota.is_none()
+            && self.memory_max.is_none()
+            && self.pids_limit.is_none()
+            && self.cpuset_cpus.is_none()
+            && self.cpuset_mems.is_none()
     }
 
     fn required_controllers(&self) -> Vec<RequiredController> {
@@ -34,6 +40,7 @@ impl CgroupConfig {
                 flag: "--cpu",
             });
         }
+
         if self.memory_max.is_some() {
             required.push(RequiredController {
                 name: "memory",
@@ -45,6 +52,16 @@ impl CgroupConfig {
             required.push(RequiredController {
                 name: "pids",
                 flag: "--pids-limit",
+            });
+        }
+
+        // Both cpuset flags are served by the single `cpuset` controller, so
+        // it is requested once rather than once per flag — two entries would
+        // emit "+cpuset +cpuset" into cgroup.subtree_control.
+        if self.cpuset_cpus.is_some() || self.cpuset_mems.is_some() {
+            required.push(RequiredController {
+                name: "cpuset",
+                flag: "--cpuset-cpus/--cpuset-mems",
             });
         }
 
@@ -91,6 +108,39 @@ fn validate_controllers(required: &[RequiredController], available: &[String]) -
         .collect::<Vec<_>>()
         .join(" "))
 }
+/// Turns a rejected `cpuset.*` write into something diagnosable by quoting the
+/// matching `.effective` file — the only place that knows what the hierarchy
+/// actually permits, since it accounts for parent restrictions and offline
+/// CPUs. `cpuset_type` is the infix: `"cpus"` or `"mems"`.
+fn handle_cpuset_write_error(
+    ret: Result<()>,
+    cgroup_dir: &Path,
+    cpuset_type: &str,
+    cpuset_value: &str,
+) -> Result<()> {
+    let Err(err) = ret else {
+        return Ok(());
+    };
+
+    // The write failed for some reason — invalid range, but equally EACCES or
+    // ENOENT. `.effective` is added as context; it never replaces the original
+    // error, which carries the actual cause.
+    let effective_file = format!("cpuset.{}.effective", cpuset_type);
+    match fs::read_to_string(cgroup_dir.join(&effective_file)) {
+        Ok(effective) => Err(err.context(format!(
+            "--cpuset-{} {:?} was rejected; {} allows {}",
+            cpuset_type,
+            cpuset_value,
+            cgroup_dir.display(),
+            effective.trim()
+        ))),
+        // A failure to read .effective must not mask the write error.
+        Err(_) => Err(err.context(format!(
+            "--cpuset-{} {:?} was rejected, and {} could not be read",
+            cpuset_type, cpuset_value, effective_file
+        ))),
+    }
+}
 
 impl Cgroup {
     pub fn create(pid: u32, config: &CgroupConfig) -> Result<Self> {
@@ -130,6 +180,16 @@ impl Cgroup {
             write_controller(&path, "pids.max", pids_limit.to_string())?;
         }
 
+        if let Some(cpuset_cpus) = &config.cpuset_cpus {
+            let ret = write_controller(&path, "cpuset.cpus", cpuset_cpus);
+            handle_cpuset_write_error(ret, &path, "cpus", cpuset_cpus)?;
+        }
+
+        if let Some(cpuset_mems) = &config.cpuset_mems {
+            let ret = write_controller(&path, "cpuset.mems", cpuset_mems);
+            handle_cpuset_write_error(ret, &path, "mems", cpuset_mems)?;
+        }
+
         Ok(Self { path })
     }
 
@@ -161,21 +221,27 @@ mod tests {
             cpu_quota: None,
             memory_max: None,
             pids_limit: None,
+            cpuset_cpus: None,
+            cpuset_mems: None,
         };
-        assert!(config.cpu_quota.is_none());
-        assert!(config.memory_max.is_none());
-        assert!(config.pids_limit.is_none());
+        assert!(config.is_noop());
     }
 
     #[test]
     fn config_with_values() {
         let config = CgroupConfig {
             cpu_quota: Some(50_000),
-            pids_limit: Some(100),
             memory_max: Some(256 * 1024 * 1024),
+            pids_limit: Some(100),
+            cpuset_cpus: Some("0-1".to_string()),
+            cpuset_mems: Some("0".to_string()),
         };
         assert_eq!(config.cpu_quota, Some(50_000));
         assert_eq!(config.memory_max, Some(268_435_456));
+        assert_eq!(config.pids_limit, Some(100));
+        assert_eq!(config.cpuset_cpus.as_deref(), Some("0-1"));
+        assert_eq!(config.cpuset_mems.as_deref(), Some("0"));
+        assert!(!config.is_noop());
     }
 
     #[test]
@@ -204,8 +270,12 @@ mod tests {
     fn create_and_destroy() {
         let config = CgroupConfig {
             cpu_quota: Some(50_000),
-            pids_limit: Some(100),
             memory_max: Some(64 * 1024 * 1024),
+            pids_limit: Some(100),
+            // CPU 0 and NUMA node 0 exist on every machine, so this stays
+            // valid wherever the root-gated suite is run.
+            cpuset_cpus: Some("0".to_string()),
+            cpuset_mems: Some("0".to_string()),
         };
         let cg = Cgroup::create(99997, &config).expect("create failed");
         assert!(cg.path.exists());
@@ -218,8 +288,10 @@ mod tests {
     fn create_cpu_only() {
         let config = CgroupConfig {
             cpu_quota: Some(25_000),
-            pids_limit: None,
             memory_max: None,
+            pids_limit: None,
+            cpuset_cpus: None,
+            cpuset_mems: None,
         };
         let cg = Cgroup::create(99998, &config).expect("create failed");
         assert!(cg.path.exists());
@@ -233,8 +305,25 @@ mod tests {
             cpu_quota: None,
             memory_max: Some(32 * 1024 * 1024),
             pids_limit: None,
+            cpuset_cpus: None,
+            cpuset_mems: None,
         };
         let cg = Cgroup::create(99999, &config).expect("create failed");
+        assert!(cg.path.exists());
+        cg.destroy().expect("destroy failed");
+    }
+
+    #[test]
+    #[ignore = "requires root and cgroups v2"]
+    fn create_cpuset_only() {
+        let config = CgroupConfig {
+            cpu_quota: None,
+            memory_max: None,
+            pids_limit: None,
+            cpuset_cpus: Some("0".to_string()),
+            cpuset_mems: None,
+        };
+        let cg = Cgroup::create(99996, &config).expect("create failed");
         assert!(cg.path.exists());
         cg.destroy().expect("destroy failed");
     }

@@ -88,6 +88,20 @@ struct CgroupArgs {
         help = "Max tasks; threads count, and PID 1 is included"
     )]
     pids_limit: Option<u64>,
+
+    #[arg(
+        long,
+        help_heading = "Resource limits",
+        help = "CPUs the container may run on, e.g. 0-3 or 0,2,4"
+    )]
+    cpuset_cpus: Option<String>,
+
+    #[arg(
+        long,
+        help_heading = "Resource limits",
+        help = "NUMA memory nodes the container may allocate from, e.g. 0"
+    )]
+    cpuset_mems: Option<String>,
 }
 
 impl From<CgroupArgs> for cgroups::CgroupConfig {
@@ -96,6 +110,8 @@ impl From<CgroupArgs> for cgroups::CgroupConfig {
             cpu_quota: value.cpu,
             memory_max: value.memory,
             pids_limit: value.pids_limit,
+            cpuset_cpus: value.cpuset_cpus,
+            cpuset_mems: value.cpuset_mems,
         }
     }
 }
