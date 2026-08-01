@@ -174,12 +174,16 @@ fn main() -> Result<()> {
                 .map(seccomp::SeccompProfile::from_file)
                 .transpose()?;
 
+            // Reject malformed limits before any container work happens.
+            let limits: cgroups::CgroupConfig = limits.into();
+            limits.validate()?;
+
             let opts = namespace::RunOptions {
                 command,
                 rootfs,
                 image,
                 hostname,
-                limits: limits.into(),
+                limits,
                 seccomp_profile,
             };
 

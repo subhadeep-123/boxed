@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use nix::sys::stat::{SFlag, major, minor, stat};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -31,6 +32,18 @@ impl CgroupConfig {
             && self.cpuset_cpus.is_none()
             && self.cpuset_mems.is_none()
             && self.io_max.is_empty()
+    }
+
+    /// Rejects malformed `--io-max` values up front. `create` parses these
+    /// again, but only after the container has been cloned — calling this
+    /// straight after argument parsing turns a typo into an immediate error
+    /// instead of one reported after a process has been spawned and killed.
+    pub fn validate(&self) -> Result<()> {
+        for spec in &self.io_max {
+            let parsed = parse_io_max(spec)?;
+            resolve_device(&parsed.device)?;
+        }
+        Ok(())
     }
 
     fn required_controllers(&self) -> Vec<RequiredController> {
@@ -78,6 +91,79 @@ impl CgroupConfig {
     }
 }
 
+/// One `--io-max` value: the device it names, and the limits asked for it.
+#[derive(Debug, PartialEq)]
+struct IoMax {
+    device: String,
+    limits: Vec<(String, u64)>,
+}
+
+/// The only keys `io.max` accepts. Anything else is a typo and silently
+/// dropping it would leave the user believing a limit was applied
+const IO_MAX_KEYS: [&str; 4] = ["rbps", "wbps", "riops", "wiops"];
+
+fn parse_io_max(spec: &str) -> Result<IoMax> {
+    let (device, limits) = spec.split_once(':').with_context(|| {
+        format!("invalid --io-max {spec:?}: expected DEVICE:KEY=VALUE, e.g. /dev/sda:wbps=1048576")
+    })?;
+
+    if device.is_empty() {
+        bail!("invalid --io-max {spec:?}: device path is empty");
+    }
+    if limits.is_empty() {
+        bail!("invalid --io-max {spec:?}: no limits given after ':'");
+    }
+
+    let limits = limits
+        .split(',')
+        .map(|pair| {
+            let (key, value) = pair
+                .split_once('=')
+                .with_context(|| format!("invalid --io-max entry {pair:?}: expected KEY=VALUE"))?;
+
+            if !IO_MAX_KEYS.contains(&key) {
+                bail!(
+                    "invalid --io-max key {key:?}: expected one of {}",
+                    IO_MAX_KEYS.join(", ")
+                );
+            }
+
+            let value: u64 = value
+                .parse()
+                .with_context(|| format!("invalid --io-max value {value:?} for {key}"))?;
+
+            Ok((key.to_string(), value))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(IoMax {
+        device: device.to_string(),
+        limits,
+    })
+}
+
+///  /dev/sda -> "8:0". The only part that touches the kernel.
+fn resolve_device(path: &str) -> Result<String> {
+    let info = stat(path).with_context(|| format!("failed to stat {path}"))?;
+
+    // /dev/null is a "character" device with a perfectly valid st_rdev
+    // Writing its number to io.max would throttle nothing, silently.
+    if SFlag::from_bits_truncate(info.st_mode) & SFlag::S_IFMT != SFlag::S_IFBLK {
+        bail!("{path} is not a block device");
+    }
+
+    // st_rdev is the device this node "refers to. st_dev would be devtmpfs,
+    // the filesystem the node itself lives on, which cannot be throttled.
+    Ok(format!("{}:{}", major(info.st_rdev), minor(info.st_rdev)))
+}
+
+fn render_io_max(device_number: &str, limits: &[(String, u64)]) -> String {
+    let mut line = String::from(device_number);
+    for (key, value) in limits {
+        line.push_str(&format!(" {key}={value}"));
+    }
+    line
+}
 pub struct Cgroup {
     pub path: PathBuf,
 }
@@ -197,6 +283,12 @@ impl Cgroup {
         if let Some(cpuset_mems) = &config.cpuset_mems {
             let ret = write_controller(&path, "cpuset.mems", cpuset_mems);
             handle_cpuset_write_error(ret, &path, "mems", cpuset_mems)?;
+        }
+
+        for spec in &config.io_max {
+            let parsed = parse_io_max(spec)?;
+            let device = resolve_device(&parsed.device)?;
+            write_controller(&path, "io.max", render_io_max(&device, &parsed.limits))?;
         }
 
         Ok(Self { path })
