@@ -612,3 +612,155 @@ fn run_image_cow_does_not_affect_base_layer() {
         leaked_to_base.display()
     );
 }
+
+// ── Resource limits: argument rejection (no root required) ───────────────────
+//
+// These run unprivileged because CgroupConfig::validate() is called straight
+// after argument parsing, before any container work.
+
+#[test]
+fn io_max_unknown_key_rejected() {
+    let out = boxed()
+        .args([
+            "run",
+            "--io-max",
+            "/dev/sda:wpbs=1048576",
+            "/bin/echo",
+            "hi",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("wpbs"),
+        "should quote the bad key: {stderr}"
+    );
+}
+
+#[test]
+fn io_max_non_block_device_rejected() {
+    let out = boxed()
+        .args([
+            "run",
+            "--io-max",
+            "/dev/null:wbps=1048576",
+            "/bin/echo",
+            "hi",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("not a block device"), "stderr: {stderr}");
+}
+
+#[test]
+fn io_max_missing_colon_rejected() {
+    let out = boxed()
+        .args(["run", "--io-max", "/dev/sda", "/bin/echo", "hi"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("DEVICE:KEY=VALUE"), "stderr: {stderr}");
+}
+
+#[test]
+fn run_help_lists_every_resource_limit() {
+    let out = boxed().args(["run", "--help"]).output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for flag in [
+        "--cpu",
+        "--memory",
+        "--pids-limit",
+        "--cpuset-cpus",
+        "--cpuset-mems",
+        "--io-max",
+    ] {
+        assert!(stdout.contains(flag), "missing {flag} in --help");
+    }
+    assert!(
+        stdout.contains("Resource limits"),
+        "limits should be grouped under their own heading"
+    );
+}
+
+// ── Resource limits: enforcement (requires root) ─────────────────────────────
+
+#[test]
+#[ignore = "requires root (CAP_SYS_ADMIN) and cgroups v2"]
+fn pids_limit_contains_fork_bomb() {
+    // A bounded fork loop rather than `:(){ :|:& };:` — with a working limit
+    // both are contained, but only this one is survivable if the limit is
+    // broken. 200 attempts against a limit of 10 will always hit EAGAIN.
+    let out = Command::new("sudo")
+        .args([
+            env!("CARGO_BIN_EXE_boxed"),
+            "run",
+            "--pids-limit",
+            "10",
+            "/bin/sh",
+            "-c",
+            "i=0; while [ $i -lt 200 ]; do /bin/sleep 5 & i=$((i+1)); done; echo survived",
+        ])
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // The shell reports each refused fork; the exact wording varies by shell,
+    // so accept either the errno text or the generic "fork" complaint.
+    assert!(
+        stderr.contains("Resource temporarily unavailable") || stderr.contains("fork"),
+        "expected the kernel to refuse forks past the limit; stderr: {stderr}"
+    );
+}
+
+#[test]
+#[ignore = "requires root, cgroups v2, and BOXED_TEST_BLOCK_DEV=/dev/sdX"]
+fn io_max_throttles_direct_writes() {
+    // The backing device differs per machine, so it is supplied explicitly
+    // rather than guessed from a mount point.
+    let Ok(device) = std::env::var("BOXED_TEST_BLOCK_DEV") else {
+        eprintln!("skipping: set BOXED_TEST_BLOCK_DEV to a block device, e.g. /dev/sda");
+        return;
+    };
+
+    let target = "/var/tmp/boxed-io-max-test.bin";
+    // 20MB at 2MB/s cannot complete faster than ~10s.
+    let limit = 2 * 1024 * 1024;
+    let started = std::time::Instant::now();
+
+    let out = Command::new("sudo")
+        .args([
+            env!("CARGO_BIN_EXE_boxed"),
+            "run",
+            "--io-max",
+            &format!("{device}:wbps={limit}"),
+            "/bin/dd",
+            "if=/dev/zero",
+            &format!("of={target}"),
+            "bs=1M",
+            "count=20",
+            // Buffered writes return from page cache and are flushed later by
+            // writeback, outside this cgroup's accounting — they would show no
+            // throttling at all and make a correct implementation look broken.
+            "oflag=direct",
+        ])
+        .output()
+        .unwrap();
+
+    let elapsed = started.elapsed();
+    let _ = std::fs::remove_file(target);
+
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        elapsed.as_secs() >= 5,
+        "20MB at {limit}B/s should have taken ~10s, took {elapsed:?} — was the write throttled?"
+    );
+}

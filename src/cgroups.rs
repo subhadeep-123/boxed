@@ -370,6 +370,197 @@ mod tests {
         assert_eq!(format!("{} 100000", 100_000u64), "100000 100000");
     }
 
+    // ── controller selection ────────────────────────────────────────────────
+
+    #[test]
+    fn required_controller_names_are_real_kernel_controllers() {
+        // The only names that can appear in cgroup.controllers. A Rust field
+        // name (pids_limit, cpuset_cpus, io_max) is not one of them, and using
+        // one silently breaks the flag it belongs to — this has been the most
+        // repeated mistake in this module.
+        const KERNEL_CONTROLLERS: [&str; 8] = [
+            "cpuset", "cpu", "io", "memory", "hugetlb", "pids", "rdma", "misc",
+        ];
+
+        let config = CgroupConfig {
+            cpu_quota: Some(1),
+            memory_max: Some(1),
+            pids_limit: Some(1),
+            cpuset_cpus: Some("0".to_string()),
+            cpuset_mems: Some("0".to_string()),
+            io_max: vec!["/dev/sda:wbps=1".to_string()],
+        };
+
+        for controller in config.required_controllers() {
+            assert!(
+                KERNEL_CONTROLLERS.contains(&controller.name),
+                "`{}` (flag {}) is not a cgroup v2 controller name",
+                controller.name,
+                controller.flag
+            );
+        }
+    }
+
+    #[test]
+    fn cpuset_controller_requested_once_for_both_flags() {
+        let config = CgroupConfig {
+            cpu_quota: None,
+            memory_max: None,
+            pids_limit: None,
+            cpuset_cpus: Some("0".to_string()),
+            cpuset_mems: Some("0".to_string()),
+            io_max: Vec::new(),
+        };
+        let names: Vec<&str> = config
+            .required_controllers()
+            .iter()
+            .map(|c| c.name)
+            .collect();
+        // Two entries would emit "+cpuset +cpuset".
+        assert_eq!(names, vec!["cpuset"]);
+    }
+
+    #[test]
+    fn validate_controllers_builds_subtree_control_line() {
+        let required = [
+            RequiredController {
+                name: "cpu",
+                flag: "--cpu",
+            },
+            RequiredController {
+                name: "memory",
+                flag: "--memory",
+            },
+        ];
+        let available = ["cpu".to_string(), "memory".to_string(), "io".to_string()];
+        assert_eq!(
+            validate_controllers(&required, &available).unwrap(),
+            "+cpu +memory"
+        );
+    }
+
+    #[test]
+    fn validate_controllers_rejects_undelegated_controller() {
+        let required = [RequiredController {
+            name: "io",
+            flag: "--io-max",
+        }];
+        let available = ["cpu".to_string(), "memory".to_string()];
+        let err = validate_controllers(&required, &available)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--io-max"), "should name the flag: {err}");
+        assert!(
+            err.contains("cpu memory"),
+            "should list what is available: {err}"
+        );
+    }
+
+    #[test]
+    fn read_controllers_splits_and_trims() {
+        let path = std::env::temp_dir().join(format!("boxed-controllers-{}", std::process::id()));
+        fs::write(&path, "cpuset cpu io memory pids\n").unwrap();
+        let controllers = read_controllers(&path);
+        fs::remove_file(&path).ok();
+        assert_eq!(
+            controllers.unwrap(),
+            vec!["cpuset", "cpu", "io", "memory", "pids"]
+        );
+    }
+
+    // ── io.max parsing ──────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_io_max_single_limit() {
+        assert_eq!(
+            parse_io_max("/dev/sda:wbps=1048576").unwrap(),
+            IoMax {
+                device: "/dev/sda".to_string(),
+                limits: vec![("wbps".to_string(), 1_048_576)],
+            }
+        );
+    }
+
+    #[test]
+    fn parse_io_max_multiple_limits_keep_order() {
+        let parsed = parse_io_max("/dev/sda:wbps=1048576,riops=200").unwrap();
+        assert_eq!(parsed.device, "/dev/sda");
+        assert_eq!(
+            parsed.limits,
+            vec![("wbps".to_string(), 1_048_576), ("riops".to_string(), 200)]
+        );
+    }
+
+    #[test]
+    fn parse_io_max_accepts_every_valid_key() {
+        let parsed = parse_io_max("/dev/sda:rbps=1,wbps=2,riops=3,wiops=4").unwrap();
+        assert_eq!(parsed.limits.len(), IO_MAX_KEYS.len());
+    }
+
+    #[test]
+    fn parse_io_max_rejects_missing_colon() {
+        let err = parse_io_max("/dev/sda").unwrap_err().to_string();
+        assert!(err.contains("DEVICE:KEY=VALUE"), "{err}");
+    }
+
+    #[test]
+    fn parse_io_max_rejects_empty_device() {
+        assert!(parse_io_max(":wbps=1").is_err());
+    }
+
+    #[test]
+    fn parse_io_max_rejects_empty_limits() {
+        assert!(parse_io_max("/dev/sda:").is_err());
+    }
+
+    #[test]
+    fn parse_io_max_rejects_pair_without_equals() {
+        let err = parse_io_max("/dev/sda:wbps").unwrap_err().to_string();
+        assert!(err.contains("KEY=VALUE"), "{err}");
+    }
+
+    #[test]
+    fn parse_io_max_rejects_unknown_key() {
+        // A transposed key is the dangerous case: silently dropping it would
+        // leave the user believing a limit was applied.
+        let err = parse_io_max("/dev/sda:wpbs=1").unwrap_err().to_string();
+        assert!(err.contains("wpbs"), "should quote the bad key: {err}");
+        assert!(err.contains("rbps"), "should list valid keys: {err}");
+    }
+
+    #[test]
+    fn parse_io_max_rejects_non_numeric_value() {
+        let err = parse_io_max("/dev/sda:wbps=lots").unwrap_err().to_string();
+        assert!(err.contains("lots"), "{err}");
+    }
+
+    #[test]
+    fn render_io_max_formats_one_line_per_device() {
+        assert_eq!(
+            render_io_max("8:0", &[("wbps".to_string(), 1_048_576)]),
+            "8:0 wbps=1048576"
+        );
+        assert_eq!(
+            render_io_max("8:0", &[("wbps".to_string(), 1), ("riops".to_string(), 2)]),
+            "8:0 wbps=1 riops=2"
+        );
+    }
+
+    // ── device resolution (no root needed for the rejection paths) ──────────
+
+    #[test]
+    fn resolve_device_rejects_character_device() {
+        // /dev/null has a perfectly valid st_rdev; only the S_ISBLK check
+        // stops us throttling a device that does no block IO.
+        let err = resolve_device("/dev/null").unwrap_err().to_string();
+        assert!(err.contains("not a block device"), "{err}");
+    }
+
+    #[test]
+    fn resolve_device_rejects_missing_path() {
+        assert!(resolve_device("/dev/boxed-no-such-device").is_err());
+    }
+
     #[test]
     fn cgroup_path_contains_pid() {
         let pid: u32 = 1234;
