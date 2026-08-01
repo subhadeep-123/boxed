@@ -6,9 +6,31 @@ follow [Conventional Commits](https://www.conventionalcommits.org/).
 
 ## [Unreleased]
 
-Adds a layered overlayfs root filesystem as an alternative to a flat `--rootfs`.
+Adds a layered overlayfs root filesystem as an alternative to a flat `--rootfs`,
+and extends cgroup resource limits beyond CPU and memory.
 
 ### Features
+
+- Four more cgroup v2 controllers: `--pids-limit` caps the number of tasks,
+  `--cpuset-cpus` and `--cpuset-mems` pin a container to specific CPUs and
+  NUMA nodes, and a repeatable `--io-max` caps block IO throughput per
+  device. `--pids-limit` is the one that protects the host rather than the
+  container: a fork bomb exhausts the system-wide PID table, and nothing
+  else in the set prevents that.
+- Controllers are now enabled by probing the parent cgroup's own
+  `cgroup.controllers` — the set actually delegated to it — instead of
+  writing a hardcoded `+cpu +memory`. Requesting a controller the kernel
+  has not delegated fails with a message naming the flag and listing what
+  is available, rather than a bare `ENOENT` from the write.
+- `--io-max` takes a device path (`/dev/sda:wbps=1048576`) rather than a
+  raw `MAJ:MIN` pair, resolving it through `stat(2)` and rejecting anything
+  that is not a block device. Note only direct IO is throttled: buffered
+  writes return from page cache and are flushed later by writeback, outside
+  the cgroup's accounting.
+- Malformed limits are rejected immediately after argument parsing, before
+  the container is cloned, so a typo no longer costs a spawned and killed
+  child process.
+- Limit flags are grouped under a "Resource limits" heading in `--help`.
 
 - `--image <DIR>` stacks ordered layer subdirectories with overlayfs
   (read-only lowers, an ephemeral per-run upper/work scratch) into one

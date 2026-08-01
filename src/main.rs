@@ -34,11 +34,8 @@ enum Commands {
         )]
         image: Option<String>,
 
-        #[arg(long, help = "CPU quota in microseconds (per 100000us period)")]
-        cpu: Option<u64>,
-
-        #[arg(long, help = "Memory limit in bytes")]
-        memory: Option<u64>,
+        #[command(flatten)]
+        limits: CgroupArgs,
 
         #[arg(required = true, help = "Command to run inside the container")]
         command: Vec<String>,
@@ -68,6 +65,72 @@ enum Commands {
     },
 }
 
+// Cgroup limits. `help_heading` is set per-argument rather than with
+// `next_help_heading` on the struct: the latter also applies to every
+// argument declared after the `flatten` in the parent, which drags
+// unrelated flags under this heading. Doc comments are avoided here too —
+// clap turns them into the subcommand's `about` text.
+#[derive(clap::Args, Debug)]
+struct CgroupArgs {
+    #[arg(
+        long,
+        help_heading = "Resource limits",
+        help = "CPU quota in microseconds (per 100000us period)"
+    )]
+    cpu: Option<u64>,
+
+    #[arg(long, help_heading = "Resource limits", help = "Memory limit in bytes")]
+    memory: Option<u64>,
+
+    #[arg(
+        long,
+        help_heading = "Resource limits",
+        help = "Max tasks; threads count, and PID 1 is included"
+    )]
+    pids_limit: Option<u64>,
+
+    #[arg(
+        long,
+        help_heading = "Resource limits",
+        help = "CPUs the container may run on, e.g. 0-3 or 0,2,4"
+    )]
+    cpuset_cpus: Option<String>,
+
+    #[arg(
+        long,
+        help_heading = "Resource limits",
+        help = "NUMA memory nodes the container may allocate from, e.g. 0"
+    )]
+    cpuset_mems: Option<String>,
+
+    #[arg(
+        long,
+        help_heading = "Resource limits",
+        help = "Block IO cap, e.g. /dev/sda:wbps=1048576 — keys rbps/wbps (bytes/s), riops/wiops (ops/s); repeat per device",
+        // Continuation lines start at column 0: a string literal keeps whatever
+        // indentation is typed, and clap renders it verbatim.
+        long_help = "Block IO cap, e.g. /dev/sda:wbps=1048576.
+Keys: rbps, wbps (bytes/sec), riops, wiops (ops/sec). Repeat the flag per device.
+
+Only direct I/O is throttled. Buffered writes land in page cache and are flushed \
+later by writeback, so they will appear unthrottled — test with dd oflag=direct."
+    )]
+    io_max: Vec<String>,
+}
+
+impl From<CgroupArgs> for cgroups::CgroupConfig {
+    fn from(value: CgroupArgs) -> Self {
+        Self {
+            cpu_quota: value.cpu,
+            memory_max: value.memory,
+            pids_limit: value.pids_limit,
+            cpuset_cpus: value.cpuset_cpus,
+            cpuset_mems: value.cpuset_mems,
+            io_max: value.io_max,
+        }
+    }
+}
+
 fn main() -> Result<()> {
     env_logger::Builder::from_default_env()
         .format_timestamp_millis()
@@ -83,8 +146,7 @@ fn main() -> Result<()> {
         Commands::Run {
             rootfs,
             image,
-            cpu,
-            memory,
+            limits,
             command,
             hostname,
             rootless,
@@ -97,7 +159,7 @@ fn main() -> Result<()> {
             // Render with ASCI
             // Initial Logs + Telemetry
             let mut setup_msg = format!(
-                "container config: rootfs={rootfs:?} image={image:?} cpu={cpu:?} memory={memory:?} hostname={hostname:?}",
+                "container config: rootfs={rootfs:?} image={image:?} limits={limits:?} hostname={hostname:?}",
             );
             if rootless {
                 setup_msg.push_str(" with rootless mode enabled");
@@ -112,13 +174,16 @@ fn main() -> Result<()> {
                 .map(seccomp::SeccompProfile::from_file)
                 .transpose()?;
 
+            // Reject malformed limits before any container work happens.
+            let limits: cgroups::CgroupConfig = limits.into();
+            limits.validate()?;
+
             let opts = namespace::RunOptions {
                 command,
                 rootfs,
                 image,
                 hostname,
-                cpu,
-                memory,
+                limits,
                 seccomp_profile,
             };
 
