@@ -102,6 +102,20 @@ struct CgroupArgs {
         help = "NUMA memory nodes the container may allocate from, e.g. 0"
     )]
     cpuset_mems: Option<String>,
+
+    #[arg(
+        long,
+        help_heading = "Resource limits",
+        help = "Block IO cap, e.g. /dev/sda:wbps=1048576 — keys rbps/wbps (bytes/s), riops/wiops (ops/s); repeat per device",
+        // Continuation lines start at column 0: a string literal keeps whatever
+        // indentation is typed, and clap renders it verbatim.
+        long_help = "Block IO cap, e.g. /dev/sda:wbps=1048576.
+Keys: rbps, wbps (bytes/sec), riops, wiops (ops/sec). Repeat the flag per device.
+
+Only direct I/O is throttled. Buffered writes land in page cache and are flushed \
+later by writeback, so they will appear unthrottled — test with dd oflag=direct."
+    )]
+    io_max: Vec<String>,
 }
 
 impl From<CgroupArgs> for cgroups::CgroupConfig {
@@ -112,6 +126,7 @@ impl From<CgroupArgs> for cgroups::CgroupConfig {
             pids_limit: value.pids_limit,
             cpuset_cpus: value.cpuset_cpus,
             cpuset_mems: value.cpuset_mems,
+            io_max: value.io_max,
         }
     }
 }

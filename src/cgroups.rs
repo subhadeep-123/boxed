@@ -20,6 +20,7 @@ pub struct CgroupConfig {
     pub pids_limit: Option<u64>,
     pub cpuset_cpus: Option<String>,
     pub cpuset_mems: Option<String>,
+    pub io_max: Vec<String>,
 }
 
 impl CgroupConfig {
@@ -29,6 +30,7 @@ impl CgroupConfig {
             && self.pids_limit.is_none()
             && self.cpuset_cpus.is_none()
             && self.cpuset_mems.is_none()
+            && self.io_max.is_empty()
     }
 
     fn required_controllers(&self) -> Vec<RequiredController> {
@@ -62,6 +64,13 @@ impl CgroupConfig {
             required.push(RequiredController {
                 name: "cpuset",
                 flag: "--cpuset-cpus/--cpuset-mems",
+            });
+        }
+
+        if !self.io_max.is_empty() {
+            required.push(RequiredController {
+                name: "io",
+                flag: "--io-max",
             });
         }
 
@@ -223,6 +232,7 @@ mod tests {
             pids_limit: None,
             cpuset_cpus: None,
             cpuset_mems: None,
+            io_max: Vec::new(),
         };
         assert!(config.is_noop());
     }
@@ -235,12 +245,29 @@ mod tests {
             pids_limit: Some(100),
             cpuset_cpus: Some("0-1".to_string()),
             cpuset_mems: Some("0".to_string()),
+            io_max: vec!["/dev/sda:wbps=1048576".to_string()],
         };
         assert_eq!(config.cpu_quota, Some(50_000));
         assert_eq!(config.memory_max, Some(268_435_456));
         assert_eq!(config.pids_limit, Some(100));
         assert_eq!(config.cpuset_cpus.as_deref(), Some("0-1"));
         assert_eq!(config.cpuset_mems.as_deref(), Some("0"));
+        assert_eq!(config.io_max, vec!["/dev/sda:wbps=1048576"]);
+        assert!(!config.is_noop());
+    }
+
+    #[test]
+    fn config_with_only_io_max_is_not_noop() {
+        // io_max is the one field held in a Vec, so emptiness rather than
+        // None decides whether a cgroup is created at all.
+        let config = CgroupConfig {
+            cpu_quota: None,
+            memory_max: None,
+            pids_limit: None,
+            cpuset_cpus: None,
+            cpuset_mems: None,
+            io_max: vec!["/dev/sda:wbps=1048576".to_string()],
+        };
         assert!(!config.is_noop());
     }
 
@@ -276,6 +303,7 @@ mod tests {
             // valid wherever the root-gated suite is run.
             cpuset_cpus: Some("0".to_string()),
             cpuset_mems: Some("0".to_string()),
+            io_max: Vec::new(),
         };
         let cg = Cgroup::create(99997, &config).expect("create failed");
         assert!(cg.path.exists());
@@ -292,6 +320,7 @@ mod tests {
             pids_limit: None,
             cpuset_cpus: None,
             cpuset_mems: None,
+            io_max: Vec::new(),
         };
         let cg = Cgroup::create(99998, &config).expect("create failed");
         assert!(cg.path.exists());
@@ -307,6 +336,7 @@ mod tests {
             pids_limit: None,
             cpuset_cpus: None,
             cpuset_mems: None,
+            io_max: Vec::new(),
         };
         let cg = Cgroup::create(99999, &config).expect("create failed");
         assert!(cg.path.exists());
@@ -322,6 +352,7 @@ mod tests {
             pids_limit: None,
             cpuset_cpus: Some("0".to_string()),
             cpuset_mems: None,
+            io_max: Vec::new(),
         };
         let cg = Cgroup::create(99996, &config).expect("create failed");
         assert!(cg.path.exists());
