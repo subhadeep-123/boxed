@@ -1,11 +1,9 @@
 use anyhow::{Context, Result, bail};
 use log::info;
-use nix::{
-    mount::{MsFlags, mount},
-    unistd::Pid,
-};
+use nix::mount::{MsFlags, mount};
 use std::{
     fs,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
 
@@ -46,8 +44,8 @@ fn get_overlay_root(id: u32) -> PathBuf {
     std::env::temp_dir().join(format!("{}-overlay-{}", env!("CARGO_PKG_NAME"), id))
 }
 
-fn create_overlay_scratch() -> Result<OverlayPaths> {
-    let root = get_overlay_root(std::process::id());
+fn create_overlay_scratch(run_id: u32) -> Result<OverlayPaths> {
+    let root = get_overlay_root(run_id);
 
     let upper = root.join("upper");
     let work = root.join("work");
@@ -105,20 +103,35 @@ fn mount_overlay(layers: &[PathBuf], paths: &OverlayPaths) -> Result<()> {
     Ok(())
 }
 
-pub fn setup(image: &str) -> Result<PathBuf> {
+pub fn setup(image: &str, run_id: u32) -> Result<PathBuf> {
     let image_dir = Path::new(image);
     let layers = discover_lower_layers(image_dir)?;
 
-    let overlay_paths = create_overlay_scratch()?;
+    let overlay_paths = create_overlay_scratch(run_id)?;
 
     mount_overlay(&layers, &overlay_paths)?;
 
     Ok(overlay_paths.merged)
 }
 
-pub fn teardown(pid: Pid) -> Result<()> {
-    let path = get_overlay_root(pid.as_raw() as u32);
+pub fn teardown(run_id: u32) -> Result<()> {
+    let path = get_overlay_root(run_id);
     info!("Overlay teardown, dropping - {}", path.display());
+
+    // overlayfs creates its private work/work dir with mode 000, and
+    // remove_dir_all must open a directory to list it before removing it.
+    // Root bypasses this via CAP_DAC_OVERRIDE; a rootless user owns the dir
+    // but still needs the read bit, so restore it first. NotFound means the
+    // mount never got far enough to create it, and there is nothing to fix.
+    let workdir = path.join("work").join("work");
+    match fs::set_permissions(&workdir, fs::Permissions::from_mode(0o700)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(e)
+                .with_context(|| format!("failed to make {} removable", workdir.display()));
+        }
+        _ => {}
+    }
+
     fs::remove_dir_all(path)?;
     Ok(())
 }

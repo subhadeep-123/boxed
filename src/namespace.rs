@@ -31,6 +31,7 @@ struct ChildContext {
     hostname: Option<String>,
     sync_fd: OwnedFd,
     seccomp_profile: Option<seccomp::ResolvedProfile>,
+    run_id: u32,
 }
 
 impl ChildContext {
@@ -41,6 +42,7 @@ impl ChildContext {
         hostname: Option<String>,
         sync_fd: OwnedFd,
         seccomp_profile: Option<seccomp::ResolvedProfile>,
+        run_id: u32,
     ) -> Self {
         Self {
             command: cmd,
@@ -49,13 +51,14 @@ impl ChildContext {
             hostname,
             sync_fd,
             seccomp_profile,
+            run_id,
         }
     }
 
     fn config_fs(&self) -> Result<()> {
         match (&self.image, &self.rootfs) {
             (Some(image), None) => {
-                let merged_path: PathBuf = crate::overlay::setup(image)
+                let merged_path: PathBuf = crate::overlay::setup(image, self.run_id)
                     .with_context(|| format!("Failed to setup overlay on {}", image))?;
 
                 let merged_path: &str = merged_path
@@ -208,6 +211,7 @@ pub fn run_in_namespace(opts: RunOptions, rootless: RootlessConfig) -> Result<i3
 
     let overlay_used = opts.image.is_some();
 
+    let run_id = std::process::id();
     let child_ctx = ChildContext::new(
         opts.command.to_vec(),
         opts.rootfs,
@@ -215,6 +219,7 @@ pub fn run_in_namespace(opts: RunOptions, rootless: RootlessConfig) -> Result<i3
         opts.hostname,
         read_fd,
         opts.seccomp_profile,
+        run_id,
     );
 
     let child = runtime.spawn_child(child_ctx)?;
@@ -235,7 +240,7 @@ pub fn run_in_namespace(opts: RunOptions, rootless: RootlessConfig) -> Result<i3
     let exit_code = runtime.wait_for_child(child);
 
     // Overlay teardown
-    if overlay_used && let Err(e) = overlay::teardown(child) {
+    if overlay_used && let Err(e) = overlay::teardown(run_id) {
         error!("overlay teardown failed: {:?}", e);
     }
 
