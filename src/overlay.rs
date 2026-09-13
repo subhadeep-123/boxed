@@ -3,6 +3,7 @@ use log::info;
 use nix::mount::{MsFlags, mount};
 use std::{
     fs,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
 
@@ -116,6 +117,21 @@ pub fn setup(image: &str, run_id: u32) -> Result<PathBuf> {
 pub fn teardown(run_id: u32) -> Result<()> {
     let path = get_overlay_root(run_id);
     info!("Overlay teardown, dropping - {}", path.display());
+
+    // overlayfs creates its private work/work dir with mode 000, and
+    // remove_dir_all must open a directory to list it before removing it.
+    // Root bypasses this via CAP_DAC_OVERRIDE; a rootless user owns the dir
+    // but still needs the read bit, so restore it first. NotFound means the
+    // mount never got far enough to create it, and there is nothing to fix.
+    let workdir = path.join("work").join("work");
+    match fs::set_permissions(&workdir, fs::Permissions::from_mode(0o700)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(e)
+                .with_context(|| format!("failed to make {} removable", workdir.display()));
+        }
+        _ => {}
+    }
+
     fs::remove_dir_all(path)?;
     Ok(())
 }
