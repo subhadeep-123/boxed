@@ -37,7 +37,7 @@ boxed run --rootfs /tmp/minirootfs --cpu 50000 --memory 268435456 --rootless /bi
 ```bash
 wget https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/alpine-minirootfs-3.19.0-x86_64.tar.gz
 mkdir -p /tmp/minirootfs
-sudo tar -xzf alpine-minirootfs-3.19.0-x86_64.tar.gz -C /tmp/minirootfs
+tar -xzf alpine-minirootfs-3.19.0-x86_64.tar.gz -C /tmp/minirootfs  # no sudo: --rootless needs to own it
 ```
 
 ---

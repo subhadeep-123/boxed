@@ -42,6 +42,17 @@ and extends cgroup resource limits beyond CPU and memory.
   container exits, re-deriving their path from the child's PID rather
   than needing it passed across the process boundary.
 
+### Bug Fixes
+
+- `--rootless` no longer fails with `EACCES` on a root-owned rootfs.
+  `pivot_root` now uses the `pivot_root(".", ".")` sequence from
+  `pivot_root(2)` instead of creating an `old_root` directory inside the
+  rootfs, which an unmapped owner makes unwritable even to namespace root.
+  `/proc` is now mounted before the pivot, since a user namespace may only
+  mount a new proc while the host's is still visible, which it no longer is
+  once the old root is detached. `tmp_setup.sh` also extracts `/tmp/minirootfs` as the invoking user so the
+  rootless container can write to it.
+
 ## [0.3.1] - 2026-07-25
 
 Replaces chroot with pivot_root for real root filesystem isolation.

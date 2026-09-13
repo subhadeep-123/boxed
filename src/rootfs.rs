@@ -1,6 +1,3 @@
-use std::fs;
-use std::path::PathBuf;
-
 use anyhow::{Context, Result};
 use nix::mount::{MntFlags, MsFlags, mount, umount2};
 use nix::unistd::{chdir, pivot_root};
@@ -27,39 +24,33 @@ pub fn setup(rootfs_path: &str) -> Result<()> {
     )
     .with_context(|| format!("failed to mount {} onto itself", rootfs_path))?;
 
-    // Prepare a subdirectory under rootfs_path for swap with the root
-    let put_old = PathBuf::from(rootfs_path).join("old_root");
-    fs::create_dir_all(&put_old)
-        .with_context(|| format!("failed to create subdirectory - {}", put_old.display()))?;
-
-    // Change directory to rootfs
-    chdir(rootfs_path).with_context(|| format!("failed to change directory to {}", rootfs_path))?;
-
-    // Swap the new_root with old_root
-    pivot_root(".", &put_old).with_context(|| {
-        format!(
-            "Pivot Root from {} to {} failed",
-            rootfs_path,
-            put_old.display()
-        )
-    })?;
-
-    let put_old = PathBuf::from("/old_root");
-    // Detach and clean up the old root:
-    umount2(&put_old, MntFlags::MNT_DETACH)
-        .with_context(|| format!("failed to unmount {}", put_old.display()))?;
-
-    // Remove the now-empty put_old
-    fs::remove_dir(put_old).context("failed to remove put_old mount directory")?;
-
+    // Mount /proc before pivoting: inside a user namespace the kernel only
+    // allows a new proc mount while an existing one is still fully visible
+    // in this mount namespace, and the host's /proc goes away with old root.
+    let proc_path = format!("{}/proc", rootfs_path);
     mount(
         Some("proc"),
-        "/proc",
+        proc_path.as_str(),
         Some("proc"),
         MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
         None::<&str>,
     )
-    .context("failed to mount /proc inside container")?;
+    .with_context(|| format!("failed to mount proc on {}", proc_path))?;
+
+    // Change directory to rootfs
+    chdir(rootfs_path).with_context(|| format!("failed to change directory to {}", rootfs_path))?;
+
+    // Pivot with new_root and put_old both ".": the old root is stacked on
+    // top of the new root at /, so no put_old directory has to be created
+    // inside the rootfs, which may not be writable (e.g. rootless, where the
+    // rootfs owner is not mapped into the user namespace). See pivot_root(2).
+    pivot_root(".", ".").with_context(|| format!("failed to pivot_root into {}", rootfs_path))?;
+
+    // "." resolves to the topmost mount stacked at /, which is the old root
+    umount2(".", MntFlags::MNT_DETACH).context("failed to detach old root")?;
+
+    // pivot_root does not move the cwd, so anchor it at the new root
+    chdir("/").context("failed to change directory to new root")?;
 
     Ok(())
 }
