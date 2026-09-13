@@ -1,4 +1,4 @@
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn boxed() -> Command {
     Command::new(env!("CARGO_BIN_EXE_boxed"))
@@ -305,6 +305,86 @@ fn unknown_subcommand_fails() {
     assert!(!out.status.success());
 }
 
+// ── sync pipe lifecycle (no root required, uses --rootless) ──────────────────
+
+#[test]
+fn cgroup_setup_failure_does_not_leak_child() {
+    // Forces a failure between spawn_child() and the sync-pipe write: --memory
+    // makes setup_cgroup() create /sys/fs/cgroup/boxed, which only root can do.
+    if nix::unistd::Uid::effective().is_root() {
+        eprintln!("skipping: cgroup setup succeeds as root, so nothing fails after clone");
+        return;
+    }
+
+    // Not output(): a leaked child keeps inherited stdout/stderr pipes open,
+    // and output() would wait on them forever instead of failing the test.
+    let status = boxed()
+        .args(["run", "--rootless", "--memory", "104857600", "sleep", "5"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(
+        !status.success(),
+        "expected cgroup setup to fail as non-root"
+    );
+
+    // No delay before checking: boxed reaps the child before it returns. A
+    // leaked child never reaches exec, so it still carries boxed's command
+    // line; match that rather than a bare "sleep 5" any process could run.
+    let leaked = Command::new("pgrep")
+        .args(["-f", "boxed run --rootless --memory 104857600 sleep 5"])
+        .output()
+        .unwrap();
+    assert!(
+        !leaked.status.success(),
+        "found leaked child process(es): {}",
+        String::from_utf8_lossy(&leaked.stdout)
+    );
+}
+
+#[test]
+fn sync_pipe_not_inherited_by_command() {
+    // Pipes this test process already holds may legitimately pass through
+    // boxed (from the terminal or cargo); only a pipe boxed created itself is
+    // a leak. fds 0-2 are the command's stdio, which output() makes pipes.
+    let inherited: Vec<String> = std::fs::read_dir("/proc/self/fd")
+        .unwrap()
+        .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+        .map(|target| target.display().to_string())
+        .collect();
+
+    let out = boxed()
+        .args(["run", "--rootless", "/bin/ls", "-l", "/proc/self/fd"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let leaked: Vec<&str> = stdout
+        .lines()
+        .filter(|line| {
+            let Some((lhs, target)) = line.split_once(" -> ") else {
+                return false;
+            };
+            let fd: u32 = lhs
+                .rsplit(' ')
+                .next()
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0);
+            fd > 2 && target.starts_with("pipe:") && !inherited.iter().any(|t| t == target)
+        })
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "container command inherited pipe(s) created by boxed: {leaked:?}"
+    );
+}
+
 // ── Container execution (requires root + Linux namespaces) ───────────────────
 //
 // Run with: sudo cargo test -- --include-ignored
@@ -469,38 +549,6 @@ fn run_old_root_is_unreachable() {
         "NOTFOUND",
         "a file that only exists on the host filesystem should be unreachable \
          from inside the container after pivot_root"
-    );
-}
-
-#[test]
-#[ignore = "environment-dependent: relies on cgroups v2 NOT being delegated \
-            to the invoking (non-root) user, so cgroup setup fails after the \
-            child is already spawned -- exercises the orphan-leak fix"]
-fn cgroup_setup_failure_does_not_leak_child() {
-    // Forces a failure between spawn_child() and the final sync-pipe write:
-    // --memory triggers setup_cgroup(), which fails with Permission denied
-    // creating /sys/fs/cgroup/boxed unless this user has cgroup delegation.
-    // `sleep 5` (not a fast-exiting command) makes a leaked child observable
-    // via pgrep instead of racing an instant exit.
-    let out = Command::new(env!("CARGO_BIN_EXE_boxed"))
-        .args(["run", "--rootless", "--memory", "104857600", "sleep", "5"])
-        .output()
-        .unwrap();
-    assert!(
-        !out.status.success(),
-        "expected cgroup setup to fail without delegation"
-    );
-
-    std::thread::sleep(std::time::Duration::from_millis(300));
-
-    let leaked = Command::new("pgrep")
-        .args(["-f", "sleep 5"])
-        .output()
-        .unwrap();
-    assert!(
-        !leaked.status.success(),
-        "found leaked child process(es): {}",
-        String::from_utf8_lossy(&leaked.stdout)
     );
 }
 

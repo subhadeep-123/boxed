@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use log::{error, info};
+use nix::fcntl::OFlag;
 use nix::sched::{CloneFlags, clone};
 use nix::sys::prctl::set_no_new_privs;
 use nix::sys::signal::Signal;
-use nix::unistd::{Pid, pipe, read, sethostname, write};
+use nix::unistd::{Pid, pipe2, read, sethostname, write};
 use std::ffi::CString;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 
 use crate::cgroups::{Cgroup, CgroupConfig};
@@ -30,31 +31,14 @@ struct ChildContext {
     image: Option<String>,
     hostname: Option<String>,
     sync_fd: OwnedFd,
+    // The parent's end of the sync pipe, as numbered in the parent's fd table.
+    // clone() copies that table, so the child holds this fd too and must close it.
+    parent_write_fd: RawFd,
     seccomp_profile: Option<seccomp::ResolvedProfile>,
     run_id: u32,
 }
 
 impl ChildContext {
-    fn new(
-        cmd: Vec<String>,
-        rootfs: Option<String>,
-        image: Option<String>,
-        hostname: Option<String>,
-        sync_fd: OwnedFd,
-        seccomp_profile: Option<seccomp::ResolvedProfile>,
-        run_id: u32,
-    ) -> Self {
-        Self {
-            command: cmd,
-            rootfs,
-            image,
-            hostname,
-            sync_fd,
-            seccomp_profile,
-            run_id,
-        }
-    }
-
     fn config_fs(&self) -> Result<()> {
         match (&self.image, &self.rootfs) {
             (Some(image), None) => {
@@ -86,6 +70,15 @@ impl ChildContext {
     }
 
     fn enter(&self) -> Result<()> {
+        // A pipe read returns 0 only once every write end is closed. Drop our
+        // inherited copy so that, if the parent gives up, the read below sees
+        // EOF instead of blocking forever on a write end we hold ourselves.
+        //
+        // SAFETY: nothing else in the child owns this fd. The parent's OwnedFd
+        // lives in run_in_namespace, which the child never returns to, so it
+        // is never dropped here and the fd cannot be closed twice.
+        drop(unsafe { OwnedFd::from_raw_fd(self.parent_write_fd) });
+
         // Check if parent is done writing
         let mut buf = [0u8; 1];
         let res = read(&self.sync_fd, &mut buf).context("failed to read sync signal from parent");
@@ -207,35 +200,56 @@ pub fn run_in_namespace(opts: RunOptions, rootless: RootlessConfig) -> Result<i3
     let runtime = RuntimeConfig::new(opts.limits, rootless);
 
     // Read and write file descriptor for parent-child-synchronization
-    let (read_fd, write_fd) = pipe().context("failed to create parent-child sync pipe")?;
+    let (read_fd, write_fd) =
+        pipe2(OFlag::O_CLOEXEC).context("failed to create parent-child sync pipe")?;
 
     let overlay_used = opts.image.is_some();
 
     let run_id = std::process::id();
-    let child_ctx = ChildContext::new(
-        opts.command.to_vec(),
-        opts.rootfs,
-        opts.image,
-        opts.hostname,
-        read_fd,
-        opts.seccomp_profile,
+    let child_ctx = ChildContext {
+        command: opts.command,
+        rootfs: opts.rootfs,
+        image: opts.image,
+        hostname: opts.hostname,
+        sync_fd: read_fd,
+        parent_write_fd: write_fd.as_raw_fd(),
+        seccomp_profile: opts.seccomp_profile,
         run_id,
-    );
+    };
 
     let child = runtime.spawn_child(child_ctx)?;
 
-    // Setup Uid and Gid Mapping for between Parent and Child
-    runtime.rootless.setup_mappings(child)?;
+    // Declared before the setup block, so on failure it is dropped only after
+    // the child has been reaped: rmdir on a cgroup fails while a task is in it.
+    let mut _cgroup = None;
 
-    let _cgroup = runtime.setup_cgroup(child)?;
+    // Every step that can fail while the child waits on the sync pipe, run as
+    // one block so failure is handled in exactly one place below.
+    let setup = (|| -> Result<()> {
+        // Setup Uid and Gid Mapping for between Parent and Child
+        runtime.rootless.setup_mappings(child)?;
 
-    runtime
-        .setup_signals(child)
-        .context("failed to setup up signal forwarding")?;
+        _cgroup = runtime.setup_cgroup(child)?;
 
-    // Unblock the child now that parent-side setup is done.
-    write(&write_fd, &[1]).context("failed to signal child to proceed")?;
+        runtime
+            .setup_signals(child)
+            .context("failed to setup up signal forwarding")?;
+
+        // Unblock the child now that parent-side setup is done.
+        write(&write_fd, &[1]).context("failed to signal child to proceed")?;
+        Ok(())
+    })();
+
+    // After the go-ahead byte this is just cleanup. On failure it is the abort:
+    // the child's read returns 0 and it exits without running the command.
     drop(write_fd);
+
+    if let Err(e) = setup {
+        if let Err(reap_err) = runtime.wait_for_child(child) {
+            error!("failed to reap child after setup failure: {:?}", reap_err);
+        }
+        return Err(e);
+    }
 
     let exit_code = runtime.wait_for_child(child);
 

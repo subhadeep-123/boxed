@@ -7,7 +7,8 @@ follow [Conventional Commits](https://www.conventionalcommits.org/).
 ## [Unreleased]
 
 Adds a layered overlayfs root filesystem as an alternative to a flat `--rootfs`,
-and extends cgroup resource limits beyond CPU and memory.
+extends cgroup resource limits beyond CPU and memory, and stops a container
+process from leaking when setup fails after it has been cloned.
 
 ### Features
 
@@ -39,8 +40,12 @@ and extends cgroup resource limits beyond CPU and memory.
   copy-on-write isolation possible, instead of mutating a single flat
   rootfs directly. `--image` and `--rootfs` are mutually exclusive.
 - Ephemeral scratch directories are torn down on the host after the
-  container exits, re-deriving their path from the child's PID rather
-  than needing it passed across the process boundary.
+  container exits. They are keyed by the PID of `boxed` itself, chosen
+  before the clone: inside its new PID namespace the child sees itself as
+  PID 1, so its own PID cannot name a per-run directory. Teardown first
+  restores the read bit on overlayfs's private `work/work` directory,
+  which the kernel creates with mode 000 and which a rootless user could
+  not otherwise remove.
 
 ### Bug Fixes
 
@@ -52,6 +57,14 @@ and extends cgroup resource limits beyond CPU and memory.
   mount a new proc while the host's is still visible, which it no longer is
   once the old root is detached. `tmp_setup.sh` also extracts `/tmp/minirootfs` as the invoking user so the
   rootless container can write to it.
+- A failure in parent-side setup after the clone (uid/gid mapping, cgroup
+  creation) no longer leaves the container process blocked forever. The
+  child inherited its own copy of the sync pipe's write end, so its read
+  could never see EOF. It now closes that copy first, and the parent closes
+  its end and reaps the child before returning the error, so the cgroup is
+  removed only after the child has left it.
+- The container command no longer inherits both ends of the parent/child
+  sync pipe: the pipe is created with `O_CLOEXEC`.
 
 ## [0.3.1] - 2026-07-25
 
