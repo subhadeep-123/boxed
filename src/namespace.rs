@@ -6,7 +6,7 @@ use nix::sys::prctl::set_no_new_privs;
 use nix::sys::signal::Signal;
 use nix::unistd::{Pid, pipe2, read, sethostname, write};
 use std::ffi::CString;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 
 use crate::cgroups::{Cgroup, CgroupConfig};
@@ -31,6 +31,9 @@ struct ChildContext {
     image: Option<String>,
     hostname: Option<String>,
     sync_fd: OwnedFd,
+    // The parent's end of the sync pipe, as numbered in the parent's fd table.
+    // clone() copies that table, so the child holds this fd too and must close it.
+    parent_write_fd: RawFd,
     seccomp_profile: Option<seccomp::ResolvedProfile>,
     run_id: u32,
 }
@@ -67,6 +70,15 @@ impl ChildContext {
     }
 
     fn enter(&self) -> Result<()> {
+        // A pipe read returns 0 only once every write end is closed. Drop our
+        // inherited copy so that, if the parent gives up, the read below sees
+        // EOF instead of blocking forever on a write end we hold ourselves.
+        //
+        // SAFETY: nothing else in the child owns this fd. The parent's OwnedFd
+        // lives in run_in_namespace, which the child never returns to, so it
+        // is never dropped here and the fd cannot be closed twice.
+        drop(unsafe { OwnedFd::from_raw_fd(self.parent_write_fd) });
+
         // Check if parent is done writing
         let mut buf = [0u8; 1];
         let res = read(&self.sync_fd, &mut buf).context("failed to read sync signal from parent");
@@ -200,6 +212,7 @@ pub fn run_in_namespace(opts: RunOptions, rootless: RootlessConfig) -> Result<i3
         image: opts.image,
         hostname: opts.hostname,
         sync_fd: read_fd,
+        parent_write_fd: write_fd.as_raw_fd(),
         seccomp_profile: opts.seccomp_profile,
         run_id,
     };
