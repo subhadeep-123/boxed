@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use log::{error, info};
+use nix::fcntl::OFlag;
 use nix::sched::{CloneFlags, clone};
 use nix::sys::prctl::set_no_new_privs;
 use nix::sys::signal::Signal;
@@ -35,26 +36,6 @@ struct ChildContext {
 }
 
 impl ChildContext {
-    fn new(
-        cmd: Vec<String>,
-        rootfs: Option<String>,
-        image: Option<String>,
-        hostname: Option<String>,
-        sync_fd: OwnedFd,
-        seccomp_profile: Option<seccomp::ResolvedProfile>,
-        run_id: u32,
-    ) -> Self {
-        Self {
-            command: cmd,
-            rootfs,
-            image,
-            hostname,
-            sync_fd,
-            seccomp_profile,
-            run_id,
-        }
-    }
-
     fn config_fs(&self) -> Result<()> {
         match (&self.image, &self.rootfs) {
             (Some(image), None) => {
@@ -208,20 +189,20 @@ pub fn run_in_namespace(opts: RunOptions, rootless: RootlessConfig) -> Result<i3
 
     // Read and write file descriptor for parent-child-synchronization
     let (read_fd, write_fd) =
-        pipe2(nix::fcntl::OFlag::O_CLOEXEC).context("failed to create parent-child sync pipe")?;
+        pipe2(OFlag::O_CLOEXEC).context("failed to create parent-child sync pipe")?;
 
     let overlay_used = opts.image.is_some();
 
     let run_id = std::process::id();
-    let child_ctx = ChildContext::new(
-        opts.command.to_vec(),
-        opts.rootfs,
-        opts.image,
-        opts.hostname,
-        read_fd,
-        opts.seccomp_profile,
+    let child_ctx = ChildContext {
+        command: opts.command,
+        rootfs: opts.rootfs,
+        image: opts.image,
+        hostname: opts.hostname,
+        sync_fd: read_fd,
+        seccomp_profile: opts.seccomp_profile,
         run_id,
-    );
+    };
 
     let child = runtime.spawn_child(child_ctx)?;
 
