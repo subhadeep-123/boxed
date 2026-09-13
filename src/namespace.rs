@@ -3,7 +3,7 @@ use log::{error, info};
 use nix::sched::{CloneFlags, clone};
 use nix::sys::prctl::set_no_new_privs;
 use nix::sys::signal::Signal;
-use nix::unistd::{Pid, pipe, read, sethostname, write};
+use nix::unistd::{Pid, pipe2, read, sethostname, write};
 use std::ffi::CString;
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
@@ -207,7 +207,8 @@ pub fn run_in_namespace(opts: RunOptions, rootless: RootlessConfig) -> Result<i3
     let runtime = RuntimeConfig::new(opts.limits, rootless);
 
     // Read and write file descriptor for parent-child-synchronization
-    let (read_fd, write_fd) = pipe().context("failed to create parent-child sync pipe")?;
+    let (read_fd, write_fd) =
+        pipe2(nix::fcntl::OFlag::O_CLOEXEC).context("failed to create parent-child sync pipe")?;
 
     let overlay_used = opts.image.is_some();
 
