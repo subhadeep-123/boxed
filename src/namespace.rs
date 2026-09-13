@@ -219,18 +219,37 @@ pub fn run_in_namespace(opts: RunOptions, rootless: RootlessConfig) -> Result<i3
 
     let child = runtime.spawn_child(child_ctx)?;
 
-    // Setup Uid and Gid Mapping for between Parent and Child
-    runtime.rootless.setup_mappings(child)?;
+    // Declared before the setup block, so on failure it is dropped only after
+    // the child has been reaped: rmdir on a cgroup fails while a task is in it.
+    let mut _cgroup = None;
 
-    let _cgroup = runtime.setup_cgroup(child)?;
+    // Every step that can fail while the child waits on the sync pipe, run as
+    // one block so failure is handled in exactly one place below.
+    let setup = (|| -> Result<()> {
+        // Setup Uid and Gid Mapping for between Parent and Child
+        runtime.rootless.setup_mappings(child)?;
 
-    runtime
-        .setup_signals(child)
-        .context("failed to setup up signal forwarding")?;
+        _cgroup = runtime.setup_cgroup(child)?;
 
-    // Unblock the child now that parent-side setup is done.
-    write(&write_fd, &[1]).context("failed to signal child to proceed")?;
+        runtime
+            .setup_signals(child)
+            .context("failed to setup up signal forwarding")?;
+
+        // Unblock the child now that parent-side setup is done.
+        write(&write_fd, &[1]).context("failed to signal child to proceed")?;
+        Ok(())
+    })();
+
+    // After the go-ahead byte this is just cleanup. On failure it is the abort:
+    // the child's read returns 0 and it exits without running the command.
     drop(write_fd);
+
+    if let Err(e) = setup {
+        if let Err(reap_err) = runtime.wait_for_child(child) {
+            error!("failed to reap child after setup failure: {:?}", reap_err);
+        }
+        return Err(e);
+    }
 
     let exit_code = runtime.wait_for_child(child);
 
