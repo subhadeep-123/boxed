@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use log::info;
+use log::{debug, info};
 use nix::{
     sys::{
         signal::{Signal, kill},
@@ -34,20 +34,42 @@ pub fn setup_signal_forwarding(child_pid: Pid) -> Result<()> {
     Ok(())
 }
 
+fn exit_code(status: WaitStatus) -> i32 {
+    match status {
+        WaitStatus::Exited(_, code) => code,
+        WaitStatus::Signaled(_, sig, _) => {
+            info!("child killed by signal: {:?}", sig);
+            128 + sig as i32
+        }
+        other => {
+            info!("unexpected wait status: {:?}", other);
+            1
+        }
+    }
+}
 pub fn wait_for_child(child_pid: Pid) -> Result<i32> {
     loop {
         match waitpid(child_pid, None) {
-            Ok(WaitStatus::Exited(_, code)) => return Ok(code),
-            Ok(WaitStatus::Signaled(_, sig, _)) => {
-                info!("child killed by signal: {:?}", sig);
-                return Ok(128 + sig as i32);
-            }
-            Ok(other) => {
-                info!("unexpected wait status: {:?}", other);
-                return Ok(1);
-            }
+            Ok(status) => return Ok(exit_code(status)),
             // interrupted, retry
             Err(nix::errno::Errno::EINTR) => continue,
+            Err(e) => return Err(e).context("waitpid failed"),
+        }
+    }
+}
+
+#[expect(dead_code)]
+pub fn reap_until_exit(child_pid: Pid) -> Result<i32> {
+    loop {
+        match waitpid(None, None) {
+            Ok(status) if status.pid() == Some(child_pid) => return Ok(exit_code(status)),
+            Ok(status) => debug!("reaped untracked child: {:?}", status),
+            // interrupted, retry
+            Err(nix::errno::Errno::EINTR) => continue,
+            // no children left at all: the tracked child was never seen exiting
+            Err(nix::errno::Errno::ECHILD) => {
+                anyhow::bail!("no children left while waiting for pid {child_pid}")
+            }
             Err(e) => return Err(e).context("waitpid failed"),
         }
     }
