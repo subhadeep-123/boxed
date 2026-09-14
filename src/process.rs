@@ -42,13 +42,11 @@ fn forwarded_signal_set() -> SigSet {
     set
 }
 
-#[expect(dead_code)]
 pub fn block_forwarded_signals() -> Result<()> {
     sigprocmask(SigmaskHow::SIG_BLOCK, Some(&forwarded_signal_set()), None)
         .context("failed to block forwarded signals")
 }
 
-#[expect(dead_code)]
 pub fn unblock_forwarded_signals() -> Result<()> {
     sigprocmask(SigmaskHow::SIG_UNBLOCK, Some(&forwarded_signal_set()), None)
         .context("failed to unblock forwarded signals")
@@ -79,7 +77,6 @@ pub fn wait_for_child(child_pid: Pid) -> Result<i32> {
     }
 }
 
-#[expect(dead_code)]
 pub fn reap_until_exit(child_pid: Pid) -> Result<i32> {
     loop {
         match waitpid(None, None) {

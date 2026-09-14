@@ -4,7 +4,7 @@ use nix::fcntl::OFlag;
 use nix::sched::{CloneFlags, clone};
 use nix::sys::prctl::set_no_new_privs;
 use nix::sys::signal::Signal;
-use nix::unistd::{Pid, pipe2, read, sethostname, write};
+use nix::unistd::{ForkResult, Pid, fork, pipe2, read, sethostname, write};
 use std::ffi::CString;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
@@ -69,7 +69,7 @@ impl ChildContext {
         Ok(())
     }
 
-    fn enter(&self) -> Result<()> {
+    fn enter(&self) -> Result<i32> {
         // A pipe read returns 0 only once every write end is closed. Drop our
         // inherited copy so that, if the parent gives up, the read below sees
         // EOF instead of blocking forever on a write end we hold ourselves.
@@ -106,18 +106,52 @@ impl ChildContext {
         apply_default_filter(self.seccomp_profile.as_ref())
             .context("failed to apply default seccomp filters")?;
 
-        let cmd_cstr = CString::new(self.command[0].as_str())
-            .context("command name contains an embedded null byte")?;
+        // Built before the fork, so a bad argument is an ordinary error here
+        // rather than something the forked child has to handle.
         let args: Vec<CString> = self
             .command
             .iter()
-            .map(|s| CString::new(s.as_str()).unwrap())
-            .collect();
+            .map(|s| CString::new(s.as_str()))
+            .collect::<Result<_, _>>()
+            .context("command contains an embedded null byte")?;
 
-        nix::unistd::execvp(&cmd_cstr, &args)
-            .with_context(|| format!("execvp failed for command '{}'", self.command[0]))?;
-        unreachable!();
+        // Until the parent unblocks, SIGINT/SIGTERM/SIGHUP are held pending
+        // instead of being dropped while forwarding has no target yet.
+        crate::process::block_forwarded_signals()?;
+
+        // SAFETY: this process came from clone() and is single-threaded, so the
+        // forked child can run ordinary code before it execs.
+        match unsafe { fork() }.context("failed to fork container command")? {
+            ForkResult::Child => exec_command(&args),
+            ForkResult::Parent { child } => {
+                crate::process::setup_signal_forwarding(child)?;
+                crate::process::unblock_forwarded_signals()?;
+                crate::process::reap_until_exit(child)
+            }
+        }
     }
+}
+
+// Runs in the forked child and never returns. Failure must leave through
+// _exit: returning an error would unwind through a copy of the shim's stack
+// and run its exit path a second time, in the wrong process.
+fn exec_command(args: &[CString]) -> ! {
+    // The signal mask survives execve, so skipping this would start the
+    // command with Ctrl-C blocked for its whole life.
+    if let Err(e) = crate::process::unblock_forwarded_signals() {
+        error!("{e:?}");
+        // SAFETY: _exit only ends this process, skipping atexit handlers and
+        // stdio buffers inherited from the shim.
+        unsafe { libc::_exit(127) }
+    }
+
+    let Err(e) = nix::unistd::execvp(&args[0], args);
+    error!(
+        "execvp failed for command '{}': {e}",
+        args[0].to_string_lossy()
+    );
+    // SAFETY: as above.
+    unsafe { libc::_exit(127) }
 }
 
 struct RuntimeConfig {
@@ -169,7 +203,7 @@ impl RuntimeConfig {
 
         let child_fn = Box::new(move || -> isize {
             match ctx.enter() {
-                Ok(_) => 0,
+                Ok(code) => code as isize,
                 Err(e) => {
                     log::error!("child error: {:?}", e);
                     1
