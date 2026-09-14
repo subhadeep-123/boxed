@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use log::{debug, info};
 use nix::{
     sys::{
-        signal::{Signal, kill},
+        signal::{SigSet, SigmaskHow, Signal, kill, sigprocmask},
         wait::{WaitStatus, waitpid},
     },
     unistd::Pid,
@@ -34,6 +34,26 @@ pub fn setup_signal_forwarding(child_pid: Pid) -> Result<()> {
     Ok(())
 }
 
+fn forwarded_signal_set() -> SigSet {
+    let mut set = SigSet::empty();
+    for sig in [Signal::SIGINT, Signal::SIGTERM, Signal::SIGHUP] {
+        set.add(sig);
+    }
+    set
+}
+
+#[expect(dead_code)]
+pub fn block_forwarded_signals() -> Result<()> {
+    sigprocmask(SigmaskHow::SIG_BLOCK, Some(&forwarded_signal_set()), None)
+        .context("failed to block forwarded signals")
+}
+
+#[expect(dead_code)]
+pub fn unblock_forwarded_signals() -> Result<()> {
+    sigprocmask(SigmaskHow::SIG_UNBLOCK, Some(&forwarded_signal_set()), None)
+        .context("failed to unblock forwarded signals")
+}
+
 fn exit_code(status: WaitStatus) -> i32 {
     match status {
         WaitStatus::Exited(_, code) => code,
@@ -47,6 +67,7 @@ fn exit_code(status: WaitStatus) -> i32 {
         }
     }
 }
+
 pub fn wait_for_child(child_pid: Pid) -> Result<i32> {
     loop {
         match waitpid(child_pid, None) {
