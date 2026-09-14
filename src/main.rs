@@ -85,7 +85,7 @@ struct CgroupArgs {
     #[arg(
         long,
         help_heading = "Resource limits",
-        help = "Max tasks; threads count, and PID 1 is included"
+        help = "Max tasks, including threads and the init shim (minimum 2)"
     )]
     pids_limit: Option<u64>,
 

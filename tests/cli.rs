@@ -1,4 +1,8 @@
-use std::process::{Command, Stdio};
+use nix::sys::signal::{Signal, kill};
+use nix::unistd::Pid;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 
 fn boxed() -> Command {
     Command::new(env!("CARGO_BIN_EXE_boxed"))
@@ -385,6 +389,157 @@ fn sync_pipe_not_inherited_by_command() {
     );
 }
 
+// ── init shim (no root required, uses --rootless) ────────────────────────────
+
+// Host pids of `pid`'s children, zombies included.
+fn children_of(pid: u32) -> Vec<u32> {
+    std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter_map(|p| p.parse().ok())
+        .collect()
+}
+
+fn comm(pid: u32) -> String {
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+// State letter from /proc/<pid>/stat, 'Z' for a zombie. It follows comm, which
+// is in parentheses and may contain spaces, so split after the last ") ".
+fn state(pid: u32) -> Option<char> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(") ")?.1.chars().next()
+}
+
+fn wait_until<T>(timeout: Duration, what: &str, mut poll: impl FnMut() -> Option<T>) -> T {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(value) = poll() {
+            return value;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        sleep(Duration::from_millis(20));
+    }
+}
+
+// A spawned `boxed run --rootless` that is killed on drop, so a failed assertion
+// cannot leave a container behind. Killing boxed alone is not enough: the
+// container init is its child in another PID namespace and would carry on
+// orphaned, while SIGKILL to the init takes the whole namespace down with it.
+struct Container(Child);
+
+impl Container {
+    fn spawn(args: &[&str]) -> Self {
+        let child = boxed()
+            .args(["run", "--rootless"])
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        Self(child)
+    }
+
+    fn pid(&self) -> u32 {
+        self.0.id()
+    }
+
+    // Host pid of the container process running `name`: the init or a child of it.
+    fn find(&self, name: &str) -> Option<u32> {
+        children_of(self.pid())
+            .into_iter()
+            .flat_map(|init| std::iter::once(init).chain(children_of(init)))
+            .find(|&pid| comm(pid) == name)
+    }
+
+    fn wait_exit(&mut self, timeout: Duration) -> ExitStatus {
+        wait_until(timeout, "boxed to exit", || self.0.try_wait().unwrap())
+    }
+}
+
+impl Drop for Container {
+    fn drop(&mut self) {
+        for init in children_of(self.pid()) {
+            let _ = kill(Pid::from_raw(init as i32), Signal::SIGKILL);
+        }
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn assert_signal_terminates_container(sig: Signal) {
+    let mut container = Container::spawn(&["/bin/sleep", "100"]);
+    // Signal only once `sleep` runs. boxed installs its handlers before letting
+    // the container start, and the shim holds signals pending from before its
+    // fork, so nothing sent from this point on can be dropped.
+    wait_until(Duration::from_secs(5), "sleep to start", || {
+        container.find("sleep")
+    });
+
+    kill(Pid::from_raw(container.pid() as i32), sig).unwrap();
+    let status = container.wait_exit(Duration::from_secs(5));
+    assert_eq!(
+        status.code(),
+        Some(128 + sig as i32),
+        "expected the command to die by {sig:?}"
+    );
+}
+
+#[test]
+fn run_sigint_terminates_container() {
+    assert_signal_terminates_container(Signal::SIGINT);
+}
+
+#[test]
+fn run_sigterm_terminates_container() {
+    assert_signal_terminates_container(Signal::SIGTERM);
+}
+
+#[test]
+fn run_reaps_orphaned_processes() {
+    // The subshell exits at once, orphaning `sleep 1` onto the container init,
+    // and `exec` turns the command itself into a `sleep 4` that never waits.
+    // Without an init that reaps orphans, `sleep 1` stays a zombie to the end.
+    let mut container = Container::spawn(&["/bin/sh", "-c", "(sleep 1 &); exec sleep 4"]);
+    let init = wait_until(Duration::from_secs(5), "the container init", || {
+        children_of(container.pid()).first().copied()
+    });
+
+    // By now `sleep 1` has exited and `sleep 4` has not.
+    sleep(Duration::from_secs(2));
+    assert!(
+        container.find("sleep").is_some(),
+        "the container exited before the check"
+    );
+    let zombies: Vec<u32> = children_of(init)
+        .into_iter()
+        .filter(|&pid| state(pid) == Some('Z'))
+        .collect();
+    assert!(
+        zombies.is_empty(),
+        "zombies left under the container init: {zombies:?}"
+    );
+
+    assert!(container.wait_exit(Duration::from_secs(10)).success());
+}
+
+#[test]
+fn run_missing_command_exits_127() {
+    let out = boxed()
+        .args(["run", "--rootless", "/nonexistent-command"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(127),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 // ── Container execution (requires root + Linux namespaces) ───────────────────
 //
 // Run with: sudo cargo test -- --include-ignored
@@ -446,7 +601,7 @@ fn run_init_process_is_pid_1() {
             "/tmp/minirootfs",
             "/bin/sh",
             "-c",
-            "echo $$",
+            "echo $$; cat /proc/1/comm",
         ])
         .output()
         .unwrap();
@@ -455,10 +610,11 @@ fn run_init_process_is_pid_1() {
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+    let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
-        "1",
-        "init process inside container should have PID 1"
+        stdout.lines().collect::<Vec<_>>(),
+        ["2", "boxed"],
+        "the command should be PID 2, under boxed's init shim as PID 1"
     );
 }
 

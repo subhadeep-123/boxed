@@ -7,8 +7,9 @@ follow [Conventional Commits](https://www.conventionalcommits.org/).
 ## [Unreleased]
 
 Adds a layered overlayfs root filesystem as an alternative to a flat `--rootfs`,
-extends cgroup resource limits beyond CPU and memory, and stops a container
-process from leaking when setup fails after it has been cloned.
+extends cgroup resource limits beyond CPU and memory, runs the container command
+under a minimal PID 1 init that reaps zombies and forwards signals, and stops a
+container process from leaking when setup fails after it has been cloned.
 
 ### Features
 
@@ -46,6 +47,19 @@ process from leaking when setup fails after it has been cloned.
   restores the read bit on overlayfs's private `work/work` directory,
   which the kernel creates with mode 000 and which a rootless user could
   not otherwise remove.
+- The container command now runs under a minimal init shim instead of being
+  PID 1 itself. The shim is a fork of `boxed` taken after capabilities are
+  dropped and seccomp is applied, so it stays inside the same boundary as the
+  command. It reaps every process reparented to it, forwards `SIGINT`,
+  `SIGTERM` and `SIGHUP` to the command, and exits with the command's status
+  (`128 + N` when the command was killed by signal N). Those signals are
+  blocked across the fork, so one that arrives before forwarding is ready is
+  delivered late rather than lost. Visible changes: the command is PID 2
+  (`echo $$` prints `2`, and `/proc/1/comm` reads `boxed`); a command that
+  cannot be executed exits `127` instead of `1`; `--pids-limit` counts the
+  shim, so a limit below 2 cannot start anything; and a custom
+  `--seccomp-profile` allowlist must permit `clone`, `wait4`, `kill`,
+  `rt_sigaction`, `rt_sigprocmask`, `rt_sigreturn` and `exit_group`.
 
 ### Bug Fixes
 
@@ -65,6 +79,12 @@ process from leaking when setup fails after it has been cloned.
   removed only after the child has left it.
 - The container command no longer inherits both ends of the parent/child
   sync pipe: the pipe is created with `O_CLOEXEC`.
+- Ctrl-C and `SIGTERM` now stop a running container. The command used to be
+  PID 1 of its namespace, and the kernel discards a signal sent to a
+  namespace init that has no handler for it, even when it comes from the
+  host, so the signal `boxed` forwarded was silently ignored.
+- Processes orphaned inside a container are reaped instead of piling up as
+  zombies, each of which kept a slot counted against `--pids-limit`.
 
 ## [0.3.1] - 2026-07-25
 
